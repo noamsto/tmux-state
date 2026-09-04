@@ -195,3 +195,94 @@ func TestShortReason(t *testing.T) {
 		}
 	}
 }
+
+// allCloseNodes returns every node in the tree, ignoring expansion state.
+// The style and marker rules are properties of a node, not of whether it
+// happens to be on screen, so these tests must not go through FlattenClose —
+// it stops at a collapsed parent and would silently skip whole row kinds.
+func allCloseNodes(root *CloseNode) []*CloseNode {
+	var out []*CloseNode
+	var walk func(n *CloseNode)
+	walk = func(n *CloseNode) {
+		out = append(out, n)
+		for _, c := range n.Children {
+			walk(c)
+		}
+	}
+	for _, g := range root.Children {
+		walk(g)
+	}
+	return out
+}
+
+// The close tree must never render faint or italic text: the picker used both
+// to mean "not a restore target", which reads as "old / unimportant" instead —
+// and dimOlderThan already claims that visual channel for age.
+func TestCloseRowStyle_NeverFaintOrItalic(t *testing.T) {
+	applyTheme(Theme{})
+	for _, n := range allCloseNodes(closeTreeFixture()) {
+		s := closeRowStyle(n)
+		if s.GetFaint() {
+			t.Errorf("%q: style is faint", n.Label)
+		}
+		if s.GetItalic() {
+			t.Errorf("%q: style is italic", n.Label)
+		}
+	}
+}
+
+// Scaffolding must still be visually separable from a restorable row — just by
+// a different foreground, not by dimming.
+func TestCloseRowStyle_ScaffoldingDiffersFromEventRow(t *testing.T) {
+	applyTheme(Theme{})
+	var event, scaffold *CloseNode
+	for _, n := range allCloseNodes(closeTreeFixture()) {
+		if IsCloseGroup(n) {
+			continue
+		}
+		if n.EventID != 0 && event == nil {
+			event = n
+		}
+		if n.EventID == 0 && scaffold == nil {
+			scaffold = n
+		}
+	}
+	if event == nil || scaffold == nil {
+		t.Fatalf("fixture lacks both row kinds: event=%v scaffold=%v", event, scaffold)
+	}
+	if closeRowStyle(event).GetForeground() == closeRowStyle(scaffold).GetForeground() {
+		t.Error("event and scaffolding rows share a foreground colour")
+	}
+}
+
+// The marker is the load-bearing "Enter works here" cue, so it must appear on
+// exactly the rows that carry an event id.
+func TestCloseRow_MarksOnlyRestorableRows(t *testing.T) {
+	applyTheme(Theme{})
+	for _, n := range allCloseNodes(closeTreeFixture()) {
+		if IsCloseGroup(n) {
+			continue
+		}
+		got := strings.Contains(closeRow(n, 60, false), closeMarker)
+		if want := n.EventID != 0; got != want {
+			t.Errorf("%q: marker present=%v, want %v", n.Label, got, want)
+		}
+	}
+}
+
+// State is a tag, not a suffix: " · live" reads as part of the window name.
+func TestCloseRow_StateRendersAsAParenthesisedTag(t *testing.T) {
+	applyTheme(Theme{})
+	for _, n := range allCloseNodes(closeTreeFixture()) {
+		if n.State == "" {
+			continue
+		}
+		row := closeRow(n, 60, false)
+		if !strings.Contains(row, "("+n.State+")") {
+			t.Errorf("%q: want a (%s) tag, got %q", n.Label, n.State, row)
+		}
+		if strings.Contains(row, " · "+n.State) {
+			t.Errorf("%q: still renders the old ' · %s' suffix", n.Label, n.State)
+		}
+	}
+}

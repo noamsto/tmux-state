@@ -315,9 +315,13 @@ func renderCloseTree(m PickerModel, width, height int) string {
 	return frame.Render(b.String())
 }
 
-// closeRow renders one tree row: guide prefix, expand marker, label, and a
-// right-aligned timestamp for event rows. State markers ("· live" / "· gone")
-// mark headers that carry nothing to restore.
+// closeMarker precedes every restorable row. Scaffolding gets the same two
+// cells of blank so labels stay aligned down the column.
+const closeMarker = "● "
+
+// closeRow renders one tree row: guide prefix, expand marker, restore marker,
+// label, a parenthesised state tag on scaffolding, and a right-aligned
+// timestamp for event rows.
 func closeRow(n *CloseNode, innerWidth int, active bool) string {
 	left := closeGuidePrefix(n)
 	switch {
@@ -326,9 +330,16 @@ func closeRow(n *CloseNode, innerWidth int, active bool) string {
 	case len(n.Children) > 0:
 		left += "▸ "
 	}
+	if !IsCloseGroup(n) {
+		if n.EventID != 0 {
+			left += closeMarker
+		} else {
+			left += strings.Repeat(" ", lipgloss.Width(closeMarker))
+		}
+	}
 	left += n.Label
 	if n.State != "" {
-		left += " · " + n.State
+		left += " (" + n.State + ")"
 	}
 
 	right := ""
@@ -361,19 +372,26 @@ func closeRow(n *CloseNode, innerWidth int, active bool) string {
 		// invisible. Same reason appendNodeRows renders the active row plain.
 		return rowActive.Width(innerWidth).Render(line)
 	}
-	style := nodePane
-	switch n.Kind {
-	case GroupThis, GroupOther:
-		style = previewHeader
-	case CSession:
-		style = nodeSession
-	case CWindow:
-		style = nodeWindow
+	return closeRowStyle(n).Width(innerWidth).Render(line)
+}
+
+// closeRowStyle returns the single flat style for a non-cursor close row.
+// Scaffolding is separated from restorable rows by foreground alone — never by
+// Faint or Italic, which the picker reserves for age.
+func closeRowStyle(n *CloseNode) lipgloss.Style {
+	if IsCloseGroup(n) {
+		return previewHeader
 	}
 	if n.EventID == 0 {
-		style = style.Faint(true).Italic(true)
+		return rowScaffold
 	}
-	return style.Width(innerWidth).Render(line)
+	switch n.Kind {
+	case CSession:
+		return nodeSession
+	case CWindow:
+		return nodeWindow
+	}
+	return nodePane
 }
 
 // hiddenPhrase renders the pluralized "N unrecoverable close(s)" fragment.
