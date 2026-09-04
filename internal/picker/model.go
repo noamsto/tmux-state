@@ -350,17 +350,25 @@ func (m PickerModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case key.Matches(msg, m.keys.Left):
 			if m.cursor >= 0 && m.cursor < len(vis) {
-				// Collapse the row itself when it is an open parent, otherwise
-				// collapse its parent and step onto it.
 				n := vis[m.cursor]
 				if n.Expanded && len(n.Children) > 0 {
 					n.Expanded = false
 					return m, nil
 				}
-				if p := n.Parent; p != nil && p.Parent != nil {
-					p.Expanded = false
-					m.cursor = closeIndexOf(m.CloseVisible(), p)
+				// Walk up to the nearest collapsible ancestor below the
+				// synthetic root and collapse it. The cursor cannot step onto
+				// that ancestor when it is scaffolding, so land on the nearest
+				// stop at or above where it sits — the enclosing group header
+				// in the worst case.
+				for a := n.Parent; a != nil && a.Parent != nil; a = a.Parent {
+					if !a.Expanded || len(a.Children) == 0 {
+						continue
+					}
+					a.Expanded = false
+					next := m.CloseVisible()
+					m.cursor = closeNavAt(next, closeIndexOf(next, a))
 					(&m).ensureManifest()
+					return m, nil
 				}
 			}
 			return m, nil
@@ -652,9 +660,11 @@ func (m PickerModel) CurrentEventID() int64 {
 }
 
 // isCloseNavTarget reports whether the cursor may land on n: an event row
-// (restorable) or a collapsible header (so it can be opened).
+// (restorable) or one of the two group headers (so a section can be
+// collapsed). Scaffolding — the nodes that exist only to parent something
+// restorable — is never a stop: Enter would only refuse it.
 func isCloseNavTarget(n *CloseNode) bool {
-	return n.EventID != 0 || len(n.Children) > 0
+	return n.EventID != 0 || IsCloseGroup(n)
 }
 
 // nextCloseIdx walks from start in dir (+1/-1) to the next navigable row, or
@@ -688,6 +698,22 @@ func (m PickerModel) firstCloseTarget() int {
 func closeIndexOf(vis []*CloseNode, target *CloseNode) int {
 	for i, n := range vis {
 		if n == target {
+			return i
+		}
+	}
+	return 0
+}
+
+// closeNavAt returns idx when vis[idx] is a cursor stop, else the nearest stop
+// above it. Collapsing an ancestor leaves the cursor pointing at a row it may
+// no longer land on; walking up always terminates, since row 0 is a group
+// header.
+func closeNavAt(vis []*CloseNode, idx int) int {
+	if idx >= len(vis) {
+		idx = len(vis) - 1
+	}
+	for i := idx; i >= 0; i-- {
+		if isCloseNavTarget(vis[i]) {
 			return i
 		}
 	}
