@@ -421,20 +421,26 @@ func TestModel_CloseNavigationSkipsScaffolding(t *testing.T) {
 	}
 }
 
-// Enter on a scaffolding row is now unreachable, so the only row that can
-// produce the group note is a group header.
-func TestModel_CloseEnterOnScaffoldingIsUnreachable(t *testing.T) {
+// Enter must never refuse a row the cursor can legally occupy: the refusal
+// footer note should appear exactly when that row is a group header. Walk
+// every reachable stop with 'k' — the only key that produces real upward
+// movement from this fixture's starting row — checking Enter at each one.
+func TestModel_CloseEnterRefusesOnlyGroupHeaders(t *testing.T) {
 	m := nestedCloseModel(t)
 	pm := m
-	for i := 0; i < 6; i++ {
+	for {
+		n := pm.CloseVisible()[pm.Cursor()]
 		updated, _ := pm.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 		got := updated.(picker.PickerModel)
-		vis := got.CloseVisible()
-		if note := got.FooterNote(); note != "" && !picker.IsCloseGroup(vis[got.Cursor()]) {
-			t.Fatalf("Enter refused a non-group row %q with %q", vis[got.Cursor()].Label, note)
+		if note, isGroup := got.FooterNote(), picker.IsCloseGroup(n); (note != "") != isGroup {
+			t.Fatalf("row %q (group=%v): Enter gave footer note %q", n.Label, isGroup, note)
 		}
-		updated, _ = got.Update(tea.KeyPressMsg{Code: 'j'})
-		pm = updated.(picker.PickerModel)
+		updated, _ = got.Update(tea.KeyPressMsg{Code: 'k'})
+		next := updated.(picker.PickerModel)
+		if next.Cursor() == got.Cursor() {
+			break // no further upward stop — every reachable row has been checked
+		}
+		pm = next
 	}
 }
 
