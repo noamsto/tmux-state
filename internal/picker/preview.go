@@ -56,6 +56,9 @@ type scrollbackLoadedMsg struct {
 // renderPreview renders the right-most preview pane. width is the cell budget
 // (including the rounded border). Height comes from m.height.
 func (m PickerModel) renderPreview(width int) string {
+	if m.mode == ModeClose && m.closeTree != nil {
+		return m.renderClosePreview(width)
+	}
 	frameHeight := m.panelFrameHeight()
 	innerHeight := m.previewInnerHeight()
 	innerWidth := width - 4
@@ -101,6 +104,67 @@ func (m PickerModel) renderPreview(width int) string {
 		return frame.Render(rowDim.Render("(scrollback pending)"))
 	}
 	return frame.Render(previewWindow(string(content), innerWidth, innerHeight, m.previewScroll, m.previewScrollX))
+}
+
+// renderClosePreview draws the panel for whatever close row the cursor is on.
+// Unlike snapshot mode there is no second tree to focus first: prefix+U opens
+// with this already showing.
+func (m PickerModel) renderClosePreview(width int) string {
+	frameHeight := m.panelFrameHeight()
+	innerHeight := m.previewInnerHeight()
+	innerWidth := width - 4
+	if innerWidth < 1 {
+		innerWidth = 1
+	}
+	frame := previewFrame.Width(width).Height(frameHeight).MaxHeight(frameHeight)
+
+	vis := m.CloseVisible()
+	if m.cursor < 0 || m.cursor >= len(vis) {
+		return frame.Render(rowDim.Render("(nothing selected)"))
+	}
+	n := vis[m.cursor]
+	if n.EventID == 0 {
+		return frame.Render(rowDim.Render("(a section — ↑↓ to reach a close)"))
+	}
+
+	cc := m.CloseContextFor(n.EventID)
+	if sha := m.closeCursorSHA(); sha != "" {
+		if err := m.scrollbackErrors[sha]; err != nil {
+			return frame.Render(footerWarn.Render("(scrollback file missing: " + err.Error() + ")"))
+		}
+		if content, ok := m.scrollbacks[sha]; ok {
+			return frame.Render(previewWindow(string(content), innerWidth, innerHeight, m.previewScroll, m.previewScrollX))
+		}
+		if m.loadingSHAs[sha] {
+			return frame.Render(rowDim.Render("(loading scrollback…)"))
+		}
+	}
+	w := closePreviewWindow(cc)
+	if w == nil {
+		return frame.Render(rowDim.Render("(nothing captured for this close)"))
+	}
+	if art := m.renderWindowMap(w, innerWidth, innerHeight); art != "" {
+		return frame.Render(art)
+	}
+	return frame.Render(rowDim.Render("(no layout captured for this window)"))
+}
+
+// closePreviewWindow returns the window the preview should draw: the one the
+// placement names, or the sub-manifest's first window for a session close,
+// where every window came down and the first one stands for the rest.
+func closePreviewWindow(cc CloseContext) *snapshot.Window {
+	for i := range cc.SubManifest.Sessions {
+		s := &cc.SubManifest.Sessions[i]
+		for j := range s.Windows {
+			if cc.Placement.Scope == "session" {
+				return &s.Windows[j]
+			}
+			if s.Windows[j].Index == cc.Placement.WindowIndex {
+				return &s.Windows[j]
+			}
+		}
+	}
+	return nil
 }
 
 // previewWindow returns the slice of scrollback to display: structural ANSI
@@ -151,19 +215,11 @@ func (m PickerModel) previewInnerHeight() int {
 // previewMaxScroll returns the largest valid m.previewScroll for the current
 // pane's scrollback. Used to clamp Alt+K scroll-up at the top of the buffer.
 func (m PickerModel) previewMaxScroll(innerHeight int) int {
-	nodes := m.visibleNodes()
-	if m.treeCursor < 0 || m.treeCursor >= len(nodes) {
+	sha := m.previewSHA()
+	if sha == "" {
 		return 0
 	}
-	n := nodes[m.treeCursor]
-	if n.Kind != NodePane {
-		return 0
-	}
-	p, _ := n.Ref.(*snapshot.Pane)
-	if p == nil {
-		return 0
-	}
-	content, ok := m.scrollbacks[p.ScrollbackSHA]
+	content, ok := m.scrollbacks[sha]
 	if !ok {
 		return 0
 	}

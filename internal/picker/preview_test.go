@@ -302,7 +302,7 @@ func TestPickerModel_ClosePreviewsClosedPaneScrollback(t *testing.T) {
 			Name: "demo",
 			Windows: []snapshot.Window{{
 				Index: 1, Name: "tmux-remux",
-				Panes: []snapshot.Pane{{Index: 1, Cwd: "/tmp", Command: "fish", ScrollbackSHA: sha}},
+				Panes: []snapshot.Pane{{Index: 1, ID: "%1", Cwd: "/tmp", Command: "fish", ScrollbackSHA: sha}},
 			}},
 		}},
 	}
@@ -312,7 +312,7 @@ func TestPickerModel_ClosePreviewsClosedPaneScrollback(t *testing.T) {
 	// rather than the event slice — the path production actually takes.
 	ctxs := map[int64]CloseContext{7: {
 		Label:       "pane",
-		Placement:   ClosePlacement{Session: "demo", WindowIndex: 1, Scope: "pane"},
+		Placement:   ClosePlacement{Session: "demo", WindowIndex: 1, Scope: "pane", PaneID: "%1"},
 		SubManifest: sub,
 	}}
 	m := NewPickerModel(ModeClose, []store.Event{ev}, nil, scrollback.New(t.TempDir()))
@@ -320,48 +320,12 @@ func TestPickerModel_ClosePreviewsClosedPaneScrollback(t *testing.T) {
 	m.SetCloseTree(BuildCloseTree([]store.Event{ev}, ctxs, "demo", nil))
 	m.Bootstrap()
 	m.width, m.height = 130, 20
-	m.focus = focusTree
-	m.treeCursor = paneNodeIndex(t, m)
 	m.scrollbacks[sha] = []byte("step 34: reading files…")
 
 	_, _, previewWidth := m.paneWidthsThree()
 	got := m.renderPreview(previewWidth)
 	if !strings.Contains(got, "step 34") {
 		t.Errorf("close-mode preview does not show the pane's scrollback:\n%s", got)
-	}
-}
-
-// Without this the arrows stay with the close tree and the pane cursor never
-// moves, so the preview can never be pointed at anything.
-func TestPickerModel_CloseTreeYieldsArrowsWhenPreviewFocused(t *testing.T) {
-	sub := snapshot.Manifest{
-		V: 1,
-		Sessions: []snapshot.Session{{
-			Name: "demo",
-			Windows: []snapshot.Window{{
-				Index: 1,
-				Panes: []snapshot.Pane{
-					{Index: 1, Command: "fish", ScrollbackSHA: "aaa"},
-					{Index: 2, Command: "fish", ScrollbackSHA: "bbb"},
-				},
-			}},
-		}},
-	}
-	ev := store.Event{ID: 7, Kind: "pane-died", ManifestJSON: `{"pane_id":"%1"}`}
-	m := NewPickerModel(ModeClose, []store.Event{ev}, nil, scrollback.New(t.TempDir()))
-	m.SetCloseContexts(map[int64]CloseContext{7: {Label: "pane", SubManifest: sub}})
-	m.Bootstrap()
-	m.width, m.height = 130, 20
-	m.focus = focusTree
-	first := paneNodeIndex(t, m)
-	m.treeCursor = first
-
-	if sha := m.focusedPaneSHA(); sha == "" {
-		t.Fatal("focusedPaneSHA is empty in close mode with a pane focused")
-	}
-	next, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
-	if got := next.(PickerModel).TreeCursor(); got == first {
-		t.Errorf("Down left the pane cursor at %d; it should have advanced", got)
 	}
 }
 
@@ -580,4 +544,66 @@ func TestPickerModel_DemoKeysEchoesLastKey(t *testing.T) {
 	if off.lastKey != "" {
 		t.Errorf("lastKey = %q with demoKeys off, want empty", off.lastKey)
 	}
+}
+
+// prefix+U used to open on "(press Tab to preview panes)". The preview must be
+// live from the first frame, following the close-tree cursor.
+func TestRenderPreview_CloseModeNeedsNoTab(t *testing.T) {
+	m := nestedClosePreviewModel(t)
+	_, _, previewW := m.paneWidthsThree()
+	out := m.renderPreview(previewW)
+	if strings.Contains(out, "press Tab") {
+		t.Errorf("close preview still gated behind Tab:\n%s", out)
+	}
+	if !strings.Contains(out, "docs") {
+		t.Errorf("close preview does not name the window it would restore:\n%s", out)
+	}
+}
+
+// Moving the close cursor must move the preview with it, without a focus change.
+func TestRenderPreview_CloseModeTracksTheCursor(t *testing.T) {
+	m := nestedClosePreviewModel(t)
+	_, _, previewW := m.paneWidthsThree()
+	first := m.renderPreview(previewW)
+
+	updated, _ := m.Update(tea.KeyPressMsg{Code: 'j'})
+	pm := updated.(PickerModel)
+	if pm.focus != focusList {
+		t.Fatalf("focus moved to %v; the preview should follow the list cursor", pm.focus)
+	}
+	if pm.renderPreview(previewW) == first {
+		t.Error("preview did not change when the close cursor moved")
+	}
+}
+
+// nestedClosePreviewModel builds a close-mode picker whose sub-manifest carries
+// a real two-pane layout, so the preview has a map to draw.
+func nestedClosePreviewModel(t *testing.T) PickerModel {
+	t.Helper()
+	man := snapshot.Manifest{Sessions: []snapshot.Session{{
+		Name: "lazytmux",
+		Windows: []snapshot.Window{{
+			Index:  3,
+			Name:   "docs",
+			Layout: "a1b2,80x24,0,0[80x12,0,0,1,80x11,0,13,2]",
+			Panes: []snapshot.Pane{
+				{Index: 0, Command: "fish", ID: "%1"},
+				{Index: 1, Command: "nvim", ID: "%2"},
+			},
+		}},
+	}}}
+	evs := []store.Event{
+		{ID: 1, Ts: 300, Kind: "window-unlinked"},
+		{ID: 2, Ts: 200, Kind: "pane-died"},
+	}
+	ctxs := map[int64]CloseContext{
+		1: {Label: "w", Placement: ClosePlacement{Session: "lazytmux", WindowIndex: 3, WindowName: "docs", Scope: "window", PaneCount: 2}, SubManifest: man},
+		2: {Label: "pane: nvim", Placement: ClosePlacement{Session: "lazytmux", WindowIndex: 3, WindowName: "docs", Scope: "pane", PaneID: "%2"}, SubManifest: man},
+	}
+	m := NewPickerModel(ModeClose, evs, nil, nil)
+	m.SetCloseContexts(ctxs)
+	m.SetCloseTree(BuildCloseTree(evs, ctxs, "mono", map[string]bool{}))
+	m.Bootstrap()
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 160, Height: 40})
+	return updated.(PickerModel)
 }
