@@ -12,8 +12,9 @@ import (
 
 // TestRenderList_NeverOverflowsFrame guards the list-pane box math: a lipgloss
 // frame pads short content but does NOT clip overflow, so a wrapped row or
-// footer pushes the border past the requested height and desyncs the sibling
-// panes. Rendered output must be exactly width×height for every size — even a
+// footer pushes the border past the requested height — MaxHeight then cuts the
+// line list, dropping the closing border rather than the excess — and desyncs
+// the sibling panes. Rendered output must be exactly width×height for every size — even a
 // narrow pane with a hidden-count footer pinned to the bottom. Per-row
 // truncation of a long label is covered by TestRenderCloseTree_NeverOverflowsFrame
 // instead, since renderList's row format no longer reads a close-specific label.
@@ -73,11 +74,12 @@ func TestView_NarrowStacksPanel(t *testing.T) {
 	}
 }
 
-// The close picker shares renderPreview with the snapshot picker, so
-// narrow-width stacking must cover ModeClose too: at 100 columns (the
-// stacksPanel range) the panel goes below the tree rather than being dropped.
-// Selects the window node so renderPreview draws the pane-layout map.
-func TestView_CloseModeStacksPanel(t *testing.T) {
+// Close mode is two frames side by side at 100 columns — the width that used
+// to stack the panel under a three-column body. Asserts the layout, not just
+// stacksPanel(): every frame's top-left corner sits on the same row, and there
+// are two of them, so the panel is beside the tree and no third column
+// survives. Selects a window-scoped close so the panel draws a pane map.
+func TestView_CloseModeDrawsTwoFramesSideBySide(t *testing.T) {
 	applyTheme(NewTheme())
 	sub := snapshot.Manifest{
 		V: 1,
@@ -105,18 +107,22 @@ func TestView_CloseModeStacksPanel(t *testing.T) {
 	m.SetCloseTree(BuildCloseTree([]store.Event{ev}, ctxs, "demo", nil))
 	m.Bootstrap()
 	m.width, m.height = 100, 30
-	m.focus = focusTree
-	m.treeCursor = windowNodeIndex(t, m)
 
-	if !m.stacksPanel() {
-		t.Fatal("want stacksPanel() true at 100 columns")
+	out := m.View().Content
+	if !strings.ContainsRune(out, '┌') {
+		t.Errorf("View() dropped the pane map in close mode at 100 columns:\n%s", out)
 	}
-	panel := m.renderPreview(m.width)
-	if !strings.ContainsRune(panel, '┌') {
-		t.Errorf("panel not rendered in close mode at 100 columns:\n%s", panel)
+	var rows []int
+	for i, line := range strings.Split(out, "\n") {
+		if n := strings.Count(line, "╭"); n > 0 {
+			rows = append(rows, n)
+			if i != 0 {
+				t.Errorf("a frame opens on row %d; want every frame to open on row 0:\n%s", i, out)
+			}
+		}
 	}
-	if out := m.View().Content; !strings.ContainsRune(out, '┌') {
-		t.Errorf("View() dropped the stacked panel in close mode at 100 columns:\n%s", out)
+	if len(rows) != 1 || rows[0] != 2 {
+		t.Errorf("frame corners per row = %v, want exactly one row carrying 2:\n%s", rows, out)
 	}
 }
 
@@ -355,5 +361,71 @@ func TestHumanAge(t *testing.T) {
 		if got := humanAge(tc.in); got != tc.want {
 			t.Errorf("humanAge(%v) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+// The sub-manifest column restated the hierarchy the close tree already draws.
+// Close mode is two columns at every width that has room for a preview.
+func TestPaneWidths_CloseModeHasNoMiddleColumn(t *testing.T) {
+	for _, w := range []int{80, 100, 119, 120, 160, 200} {
+		m := PickerModel{mode: ModeClose, width: w, height: 40}
+		list, tree, preview := m.paneWidthsThree()
+		if tree != 0 {
+			t.Errorf("width=%d: middle column = %d, want 0", w, tree)
+		}
+		if preview <= 0 {
+			t.Errorf("width=%d: preview = %d, want > 0", w, preview)
+		}
+		if list+tree+preview != w {
+			t.Errorf("width=%d: columns sum to %d", w, list+tree+preview)
+		}
+		if list < 32 {
+			t.Errorf("width=%d: tree column = %d, below the 32-cell floor", w, list)
+		}
+	}
+}
+
+// Snapshot mode is untouched: it keeps three columns at 120 and above.
+func TestPaneWidths_SnapshotModeKeepsThreeColumns(t *testing.T) {
+	m := PickerModel{mode: ModeSnapshot, width: 160, height: 40}
+	if _, tree, _ := m.paneWidthsThree(); tree == 0 {
+		t.Error("snapshot mode lost its middle column")
+	}
+}
+
+// Two columns side by side at every width — close mode never stacks.
+func TestView_CloseModeNeverStacks(t *testing.T) {
+	for _, w := range []int{90, 100, 119} {
+		m := PickerModel{mode: ModeClose, closeTree: closeTreeFixture(), width: w, height: 24}
+		if m.stacksPanel() {
+			t.Errorf("width=%d: close mode stacked the panel", w)
+		}
+	}
+}
+
+// Tab is snapshot-only, so close mode's footer must not advertise it — while
+// both modes still advertise the preview scroll wherever a preview column
+// exists. Reads the keys off the bindings so a rebind can't fake a pass.
+func TestRenderFooter_TabHintIsSnapshotOnly(t *testing.T) {
+	applyTheme(NewTheme())
+	tabKey := defaultKeys().Tab.Help().Key
+	scrollKey := defaultKeys().PreviewUp.Help().Key
+
+	closeM := PickerModel{mode: ModeClose, keys: defaultKeys(), width: 160, height: 40}
+	foot := stripANSI(closeM.renderFooter(closeM.width))
+	if strings.Contains(foot, tabKey+":") {
+		t.Errorf("close footer advertises Tab (%q):\n%s", tabKey, foot)
+	}
+	if !strings.Contains(foot, scrollKey+":") {
+		t.Errorf("close footer dropped the preview-scroll hint (%q):\n%s", scrollKey, foot)
+	}
+
+	snapM := PickerModel{mode: ModeSnapshot, keys: defaultKeys(), width: 160, height: 40}
+	foot = stripANSI(snapM.renderFooter(snapM.width))
+	if !strings.Contains(foot, tabKey+":") {
+		t.Errorf("snapshot footer dropped the Tab hint (%q):\n%s", tabKey, foot)
+	}
+	if !strings.Contains(foot, scrollKey+":") {
+		t.Errorf("snapshot footer dropped the preview-scroll hint (%q):\n%s", scrollKey, foot)
 	}
 }

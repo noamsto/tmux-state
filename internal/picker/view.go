@@ -34,22 +34,12 @@ func (m PickerModel) View() tea.View {
 	switch {
 	case m.mode == ModeClose && m.closeTree != nil && m.width < 80:
 		content = lipgloss.JoinVertical(lipgloss.Left, renderCloseTree(m, m.width, bodyHeight), footer)
-	case m.mode == ModeClose && m.closeTree != nil && previewWidth == 0:
-		// Close tree + sub-manifest on top, preview panel stacked below.
-		topHeight := bodyHeight - m.panelFrameHeight()
-		closes := renderCloseTree(m, listWidth, topHeight)
-		tree := renderTree(m, m.width-listWidth, topHeight)
-		top := lipgloss.JoinHorizontal(lipgloss.Top, closes, tree)
-		panel := m.renderPreview(m.width)
-		content = lipgloss.JoinVertical(lipgloss.Left, top, panel, footer)
 	case m.mode == ModeClose && m.closeTree != nil:
-		// Same, plus what the pane under the sub-manifest cursor had on screen.
-		// A closed pane is read out of the snapshot the close was diffed
-		// against, so it carries that snapshot's scrollback.
+		// Close tree beside the preview of what the cursor's close would
+		// reopen. No sub-manifest column: it restated the tree.
 		closes := renderCloseTree(m, listWidth, bodyHeight)
-		tree := renderTree(m, treeWidth, bodyHeight)
 		preview := m.renderPreview(previewWidth)
-		body := lipgloss.JoinHorizontal(lipgloss.Top, closes, tree, preview)
+		body := lipgloss.JoinHorizontal(lipgloss.Top, closes, preview)
 		content = lipgloss.JoinVertical(lipgloss.Left, body, footer)
 	case m.width < 80:
 		list := renderList(m, listWidth, bodyHeight)
@@ -119,10 +109,13 @@ func (m PickerModel) renderFooter(width int) string {
 		// inside it.
 		parts = append(parts, hint(m.keys.Right))
 	}
-	// 120 is where both modes gain the preview column; the preview is otherwise
-	// undiscoverable, since nothing else says Tab reaches it.
-	if m.width >= 120 {
-		parts = append(parts, hint(m.keys.Tab))
+	// Tab reaches snapshot mode's sub-manifest tree; close mode has no second
+	// tree, and its preview scrolls with Alt+j/k regardless of focus.
+	_, _, previewW := m.paneWidthsThree()
+	if previewW > 0 {
+		if m.mode == ModeSnapshot {
+			parts = append(parts, hint(m.keys.Tab))
+		}
 		parts = append(parts, hint(m.keys.PreviewUp))
 	}
 	line := strings.Join(parts, sep)
@@ -153,9 +146,13 @@ func (m PickerModel) bodyHeight() int {
 }
 
 // stacksPanel reports whether the map/scrollback panel goes under the tree
-// rather than beside it — the case for a terminal too narrow for a third column.
-// The popup is 90% of the client, so that threshold lands near 120 columns.
+// rather than beside it — the case for a terminal too narrow for a third
+// column. The popup is 90% of the client, so that threshold lands near 120
+// columns. Close mode only ever has two columns, so it never stacks.
 func (m PickerModel) stacksPanel() bool {
+	if m.mode == ModeClose {
+		return false
+	}
 	return m.width >= 80 && m.width < 120
 }
 
@@ -177,20 +174,19 @@ func (m PickerModel) paneWidthsThree() (int, int, int) {
 		return m.width, 0, 0
 	}
 	if m.mode == ModeClose {
-		if m.width < 120 {
-			// Give the list ~40% so labels like "session: reviewtest2401692
-			// (1w)" fit. No room for a third column, as in snapshot mode below.
-			listW := m.width * 2 / 5
-			if listW < 32 {
-				listW = 32
-			}
-			return listW, m.width - listW, 0
+		// Two columns: no sub-manifest pane, since it restated the hierarchy
+		// the close tree already draws. 40% keeps the tree past its 32-cell
+		// floor for deep guide prefixes and long session labels, and the last
+		// clamp leaves the preview at least 30 cells — enough for a pane map
+		// and the restore sentence under it.
+		treeW := m.width * 2 / 5
+		if treeW < 32 {
+			treeW = 32
 		}
-		// Thirds keep the list past its 32-cell floor while leaving the preview
-		// enough to read a wrapped line of scrollback.
-		listW := m.width / 3
-		treeW := m.width / 3
-		return listW, treeW, m.width - listW - treeW
+		if wide := m.width - 30; treeW > wide {
+			treeW = wide
+		}
+		return treeW, 0, m.width - treeW
 	}
 	if m.width < 120 {
 		// Two-pane fallback (current behavior).

@@ -326,9 +326,9 @@ func (m PickerModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// after this clear.
 	m.footerNote = ""
 	// Close mode with a grouped tree: the cursor walks tree rows, so Up/Down
-	// skip headers and Left/Right collapse and expand them. Only while the close
-	// tree holds focus — once Tab moves to the sub-manifest the arrows belong to
-	// its pane cursor, which is what drives the scrollback preview.
+	// skip headers and Left/Right collapse and expand them. Close mode never
+	// leaves focusList — Tab is snapshot-only — so the guard is an assertion
+	// that the arrows belong to this cursor, not a mode the user can exit.
 	if m.mode == ModeClose && m.closeTree != nil && m.focus == focusList {
 		vis := m.CloseVisible()
 		switch {
@@ -426,9 +426,9 @@ func (m PickerModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	// Focus-tree key handling: intercept Up/Down/Left/Right so they walk the
-	// manifest tree's panes. Close mode's tree is the sub-manifest of what was
-	// lost, and its panes preview the same way.
-	if (m.mode == ModeSnapshot || m.mode == ModeClose) && m.focus == focusTree {
+	// manifest tree's panes. Snapshot mode only — close mode has no second tree
+	// to focus, so Tab never moves it off focusList.
+	if m.mode == ModeSnapshot && m.focus == focusTree {
 		switch {
 		case key.Matches(msg, m.keys.Up):
 			if idx := m.nextPaneIdx(m.treeCursor, -1); idx >= 0 {

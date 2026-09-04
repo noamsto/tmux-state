@@ -277,24 +277,6 @@ func stripANSI(s string) string {
 
 var ansiRegexp = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 
-func TestPaneWidths_ClosePreviewNeedsWidth(t *testing.T) {
-	narrow := PickerModel{mode: ModeClose, width: 100}
-	if _, _, pv := narrow.paneWidthsThree(); pv != 0 {
-		t.Errorf("close mode at 100 cols: got preview width %d, want 0", pv)
-	}
-	wide := PickerModel{mode: ModeClose, width: 130}
-	l, tr, pv := wide.paneWidthsThree()
-	if pv == 0 {
-		t.Error("close mode at 130 cols: got no preview column, want one")
-	}
-	if l+tr+pv != 130 {
-		t.Errorf("widths %d+%d+%d do not sum to 130", l, tr, pv)
-	}
-	if l < 32 {
-		t.Errorf("list width %d is under the 32-cell floor", l)
-	}
-}
-
 // A closed pane is read out of the snapshot the close was diffed against, so it
 // carries that snapshot's ScrollbackSHA and the close picker can preview it.
 func TestPickerModel_ClosePreviewsClosedPaneScrollback(t *testing.T) {
@@ -873,20 +855,21 @@ func closePreviewFrameFixture(t *testing.T, scope string) PickerModel {
 // lipgloss frame pads short content but does not clip overflow, so a body
 // with more lines than previewInnerHeight() pushes the closing border past
 // the requested height (MaxHeight then hard-truncates the render, dropping
-// that border row and cutting the last content line off mid-string). Only
-// widths in the stacksPanel range (80-119) halve panelFrameHeight enough to
-// drive previewInnerHeight() down to 1-4; a narrow, unstacked width and a
-// wide, comfortable one cover truncation of the long window/session name.
+// that border row and cutting the last content line off mid-string). Close
+// mode never stacks, so the panel always takes the whole body: the shortest
+// terminal the picker will draw (bodyHeight's floor of 5) is what drives
+// previewInnerHeight() to its minimum of 3, where the map budget is 1 row and
+// the restore sentence takes the rest.
 func TestRenderClosePreview_NeverOverflowsFrame(t *testing.T) {
 	applyTheme(NewTheme())
 	sizes := []struct{ w, h int }{
-		{90, 6},   // bodyHeight floor 5 -> previewInnerHeight 1
-		{90, 8},   // previewInnerHeight 2
-		{90, 10},  // previewInnerHeight 3
-		{90, 12},  // previewInnerHeight 4
-		{90, 30},  // comfortable, stacked
-		{40, 20},  // narrow, unstacked
-		{160, 30}, // wide, unstacked, comfortable
+		{90, 6},   // bodyHeight floor 5 -> previewInnerHeight 3, map budget 1
+		{90, 8},   // previewInnerHeight 5
+		{90, 10},  // previewInnerHeight 7
+		{90, 12},  // previewInnerHeight 9
+		{90, 30},  // comfortable
+		{40, 20},  // narrow: below the two-column threshold
+		{160, 30}, // wide and comfortable
 	}
 	for _, scope := range []string{"window", "pane"} {
 		m := closePreviewFrameFixture(t, scope)
