@@ -156,12 +156,29 @@ func (m PickerModel) renderClosePreview(width int) string {
 // closePreviewWindow returns the window the preview should draw: the one the
 // placement names, or the sub-manifest's first window for a session close,
 // where every window came down and the first one stands for the rest.
+//
+// It prefers the session named by the placement, then falls back to scanning
+// every session in the sub-manifest. The two names are independently
+// sourced — Placement.Session from the tmux hook, the sub-manifest's from the
+// prior snapshot — and can disagree when the session was renamed in between
+// (see closeevent.OwnerSession's fallback chain); treating the name as a hard
+// filter turned that mismatch into a blank preview instead of a degraded one.
 func closePreviewWindow(cc CloseContext) *snapshot.Window {
+	if w := closePreviewWindowIn(cc, true); w != nil {
+		return w
+	}
+	return closePreviewWindowIn(cc, false)
+}
+
+// closePreviewWindowIn searches cc.SubManifest.Sessions for the placement's
+// window. With matchSession, a session whose name differs from
+// cc.Placement.Session is skipped — window indexes are only unique within a
+// session, so a sub-manifest carrying more than one needs the name to pick
+// the right one.
+func closePreviewWindowIn(cc CloseContext, matchSession bool) *snapshot.Window {
 	for i := range cc.SubManifest.Sessions {
 		s := &cc.SubManifest.Sessions[i]
-		// Window indexes are only unique within a session, so a sub-manifest
-		// carrying more than one would otherwise match the wrong window.
-		if cc.Placement.Session != "" && s.Name != cc.Placement.Session {
+		if matchSession && cc.Placement.Session != "" && s.Name != cc.Placement.Session {
 			continue
 		}
 		for j := range s.Windows {

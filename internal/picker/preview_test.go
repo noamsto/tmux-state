@@ -753,3 +753,78 @@ func closeScrollbackModel(t *testing.T, sha string) PickerModel {
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 160, Height: 20})
 	return updated.(PickerModel)
 }
+
+// A close hook can report a different session name than the prior snapshot
+// when the session was renamed in between (see closeevent.OwnerSession's
+// three-step fallback). closePreviewWindow must still resolve the window —
+// and, for a pane close, its scrollback — rather than treating the mismatch
+// as "nothing captured for this close."
+func TestClosePreviewWindow_SessionNameMismatchFallsBack(t *testing.T) {
+	cc := CloseContext{
+		Label:     "pane: nvim",
+		Placement: ClosePlacement{Session: "renamed", WindowIndex: 1, WindowName: "docs", Scope: "pane", PaneID: "%1"},
+		SubManifest: snapshot.Manifest{Sessions: []snapshot.Session{{
+			Name: "original",
+			Windows: []snapshot.Window{{
+				Index: 1, Name: "docs",
+				Panes: []snapshot.Pane{{Index: 0, ID: "%1", Command: "nvim", ScrollbackSHA: "aaa"}},
+			}},
+		}}},
+	}
+	if w := closePreviewWindow(cc); w == nil {
+		t.Fatal("closePreviewWindow returned nil for a session name mismatch; the map/scrollback goes blank")
+	}
+	if sha := closeSHAFor(cc); sha != "aaa" {
+		t.Errorf("closeSHAFor = %q, want %q", sha, "aaa")
+	}
+}
+
+// Left can collapse a window row and land the cursor on an *event* row above
+// it — not just on a pane row it collapsed from. Two pane closes in two
+// windows of one other-session group produce that shape: collapsing the
+// second window's header walks the cursor up past its own pure-header row to
+// the first window's pane close, which must still reset the preview scroll
+// and schedule that pane's scrollback.
+func TestPickerModel_CloseModeLeftLandsOnEventRowAboveCollapsedWindow(t *testing.T) {
+	man := snapshot.Manifest{Sessions: []snapshot.Session{{
+		Name: "lazytmux",
+		Windows: []snapshot.Window{
+			{Index: 1, Name: "alpha", Panes: []snapshot.Pane{{Index: 0, ID: "%1", Command: "fish", ScrollbackSHA: "aaa"}}},
+			{Index: 2, Name: "beta", Panes: []snapshot.Pane{{Index: 0, ID: "%2", Command: "nvim"}}},
+		},
+	}}}
+	evs := []store.Event{
+		{ID: 1, Ts: 300, Kind: "pane-died"},
+		{ID: 2, Ts: 200, Kind: "pane-died"},
+	}
+	ctxs := map[int64]CloseContext{
+		1: {Label: "pane: fish", Placement: ClosePlacement{Session: "lazytmux", WindowIndex: 1, WindowName: "alpha", Scope: "pane", PaneID: "%1"}, SubManifest: man},
+		2: {Label: "pane: nvim", Placement: ClosePlacement{Session: "lazytmux", WindowIndex: 2, WindowName: "beta", Scope: "pane", PaneID: "%2"}, SubManifest: man},
+	}
+	m := NewPickerModel(ModeClose, evs, nil, scrollback.New(t.TempDir()))
+	m.SetCloseContexts(ctxs)
+	m.SetCloseTree(BuildCloseTree(evs, ctxs, "mono", nil))
+	m.Bootstrap()
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 160, Height: 40})
+	m = updated.(PickerModel)
+
+	vis := m.CloseVisible()
+	if len(vis) != 6 {
+		t.Fatalf("flattened close tree has %d rows, want 6: %+v", len(vis), vis)
+	}
+	m.cursor = 5 // beta's pane %2 close
+	m.previewScroll = 3
+
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyLeft})
+	m = updated.(PickerModel)
+
+	if m.cursor != 3 {
+		t.Fatalf("cursor landed on %d, want 3 (alpha's pane %%1 close)", m.cursor)
+	}
+	if m.previewScroll != 0 {
+		t.Errorf("previewScroll = %d, want 0 after Left", m.previewScroll)
+	}
+	if !m.loadingSHAs["aaa"] {
+		t.Error("Left did not schedule the scrollback load for the event row it landed on")
+	}
+}
