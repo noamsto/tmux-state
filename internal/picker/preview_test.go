@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"regexp"
 	"strings"
@@ -499,8 +500,6 @@ func TestPickerModel_CloseMapMarksDeadPane(t *testing.T) {
 	m.SetCloseTree(BuildCloseTree([]store.Event{ev}, ctxs, "demo", nil))
 	m.Bootstrap()
 	m.width, m.height = 160, 24
-	m.focus = focusTree
-	m.treeCursor = windowNodeIndex(t, m)
 
 	_, _, previewWidth := m.paneWidthsThree()
 	got := m.renderPreview(previewWidth)
@@ -571,9 +570,30 @@ func TestRenderPreview_CloseModeTracksTheCursor(t *testing.T) {
 	if pm.focus != focusList {
 		t.Fatalf("focus moved to %v; the preview should follow the list cursor", pm.focus)
 	}
-	if pm.renderPreview(previewW) == first {
+	got := pm.renderPreview(previewW)
+	if got == first {
 		t.Error("preview did not change when the close cursor moved")
 	}
+	// The cursor now sits on the pane close, so the map must dash %2's box —
+	// the pane that died — and leave %1's alone.
+	dead, alive := boxLine(got, "1 nvim"), boxLine(got, "0 fish")
+	if !strings.ContainsRune(dead, '\u2506') {
+		t.Errorf("the closed pane %%2 is not marked dead:\n%s", got)
+	}
+	if strings.ContainsRune(alive, '\u2506') {
+		t.Errorf("the surviving pane %%1 is marked dead:\n%s", got)
+	}
+}
+
+// boxLine returns the rendered map line carrying label, where the pane box's
+// own side borders show whether that pane is marked dead.
+func boxLine(render, label string) string {
+	for _, l := range strings.Split(stripANSI(render), "\n") {
+		if strings.Contains(l, label) {
+			return l
+		}
+	}
+	return ""
 }
 
 // nestedClosePreviewModel builds a close-mode picker whose sub-manifest carries
@@ -605,5 +625,131 @@ func nestedClosePreviewModel(t *testing.T) PickerModel {
 	m.SetCloseTree(BuildCloseTree(evs, ctxs, "mono", map[string]bool{}))
 	m.Bootstrap()
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 160, Height: 40})
+	return updated.(PickerModel)
+}
+
+// prefix+U opens straight onto the preview, so the cursor's scrollback has to
+// be scheduled before the first key — otherwise the panel shows the window map
+// and silently swaps to scrollback once the user nudges the cursor.
+func TestPickerModel_CloseModeSchedulesScrollbackAtStartup(t *testing.T) {
+	m := closeScrollbackModel(t, closeScrollbackSHA)
+	if cmd := m.Init(); cmd == nil {
+		t.Fatal("Init scheduled no scrollback load for the close cursor's pane")
+	}
+	if !m.loadingSHAs[closeScrollbackSHA] {
+		t.Errorf("Init did not mark %q in flight", closeScrollbackSHA)
+	}
+	_, _, previewW := m.paneWidthsThree()
+	if got := m.renderPreview(previewW); !strings.Contains(got, "loading scrollback") {
+		t.Errorf("first frame does not say the scrollback is on its way:\n%s", got)
+	}
+}
+
+// A pane close whose scrollback is neither cached nor in flight must say so.
+// Falling through to the window map instead means the panel silently changes
+// content type the moment a load lands.
+func TestRenderPreview_CloseModePendingScrollback(t *testing.T) {
+	m := closeScrollbackModel(t, closeScrollbackSHA)
+	_, _, previewW := m.paneWidthsThree()
+	if got := m.renderPreview(previewW); !strings.Contains(got, "scrollback pending") {
+		t.Errorf("an unscheduled scrollback does not read as pending:\n%s", got)
+	}
+}
+
+// Tab has no second tree to reach in close mode: the preview already follows
+// the list cursor, so the key must leave both focus and the panel alone.
+func TestPickerModel_CloseModeTabIsInert(t *testing.T) {
+	m := nestedClosePreviewModel(t)
+	_, _, previewW := m.paneWidthsThree()
+	before := m.renderPreview(previewW)
+
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	pm := updated.(PickerModel)
+	if pm.focus != focusList {
+		t.Errorf("Tab moved focus to %v; close mode has no second tree to reach", pm.focus)
+	}
+	if got := pm.renderPreview(previewW); got != before {
+		t.Errorf("Tab changed the close preview:\n%s", got)
+	}
+}
+
+// Alt+j/k scroll the close preview without a focus change — the reason Tab
+// could be retired there.
+func TestPickerModel_CloseModeAltScrollsPreview(t *testing.T) {
+	m := closeScrollbackModel(t, closeScrollbackSHA)
+	var b strings.Builder
+	for i := 1; i <= 200; i++ {
+		fmt.Fprintf(&b, "line %d\n", i)
+	}
+	m.scrollbacks[closeScrollbackSHA] = []byte(b.String())
+
+	_, _, previewW := m.paneWidthsThree()
+	maxScroll := m.previewMaxScroll(m.previewInnerHeight())
+	if maxScroll == 0 {
+		t.Fatal("fixture scrollback is not taller than the preview panel")
+	}
+	tail := m.renderPreview(previewW)
+	if !strings.Contains(tail, "line 200") {
+		t.Fatalf("close preview does not open at the tail:\n%s", tail)
+	}
+
+	updated, _ := m.Update(tea.KeyPressMsg{Code: 'k', Mod: tea.ModAlt})
+	m = updated.(PickerModel)
+	if m.previewScroll != 1 {
+		t.Fatalf("alt+k left previewScroll at %d, want 1", m.previewScroll)
+	}
+	if got := m.renderPreview(previewW); got == tail {
+		t.Error("alt+k did not change the rendered close preview")
+	}
+
+	for i := 0; i < maxScroll+50; i++ {
+		updated, _ = m.Update(tea.KeyPressMsg{Code: 'k', Mod: tea.ModAlt})
+		m = updated.(PickerModel)
+	}
+	if m.previewScroll != maxScroll {
+		t.Errorf("alt+k ran past the top of the buffer: previewScroll %d, want %d", m.previewScroll, maxScroll)
+	}
+	if got := m.renderPreview(previewW); !strings.Contains(got, "line 1 ") && !strings.Contains(got, "line 1\n") {
+		t.Errorf("scrolled to the top but the first line is not on screen:\n%s", got)
+	}
+
+	updated, _ = m.Update(tea.KeyPressMsg{Code: 'j', Mod: tea.ModAlt})
+	m = updated.(PickerModel)
+	if m.previewScroll != maxScroll-1 {
+		t.Errorf("alt+j left previewScroll at %d, want %d", m.previewScroll, maxScroll-1)
+	}
+}
+
+const closeScrollbackSHA = "cafebabe"
+
+// closeScrollbackModel builds a close-mode picker sitting on a pane close whose
+// pane carries sha, so the preview resolves to scrollback rather than the map.
+func closeScrollbackModel(t *testing.T, sha string) PickerModel {
+	t.Helper()
+	sub := snapshot.Manifest{
+		V: 1,
+		Sessions: []snapshot.Session{{
+			Name: "demo",
+			Windows: []snapshot.Window{{
+				Index: 1, Name: "tmux-remux",
+				Layout: "1cb4,80x24,0,0[80x11,0,0,0,80x12,0,12,1]",
+				Panes: []snapshot.Pane{
+					{Index: 0, ID: "%0", Command: "fish"},
+					{Index: 1, ID: "%1", Command: "nvim", ScrollbackSHA: sha},
+				},
+			}},
+		}},
+	}
+	ev := store.Event{ID: 7, Kind: "pane-died", ManifestJSON: `{"pane_id":"%1"}`}
+	ctxs := map[int64]CloseContext{7: {
+		Label:       "pane: nvim",
+		Placement:   ClosePlacement{Session: "demo", WindowIndex: 1, Scope: "pane", PaneID: "%1"},
+		SubManifest: sub,
+	}}
+	m := NewPickerModel(ModeClose, []store.Event{ev}, nil, scrollback.New(t.TempDir()))
+	m.SetCloseContexts(ctxs)
+	m.SetCloseTree(BuildCloseTree([]store.Event{ev}, ctxs, "demo", nil))
+	m.Bootstrap()
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 160, Height: 20})
 	return updated.(PickerModel)
 }

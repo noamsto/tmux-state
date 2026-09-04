@@ -134,8 +134,11 @@ func (m PickerModel) ScrollbackFor(sha string) ([]byte, bool) {
 // ScrollbackError returns the cached load error for sha, or nil.
 func (m PickerModel) ScrollbackError(sha string) error { return m.scrollbackErrors[sha] }
 
-// Init satisfies tea.Model.
-func (m PickerModel) Init() tea.Cmd { return nil }
+// Init satisfies tea.Model. Close mode's preview is live from the first frame,
+// so the cursor's scrollback has to be scheduled before any key arrives —
+// otherwise the panel falls back to the window map until the user moves.
+// Snapshot mode has no SHA until Tab, so PreviewCmd returns nil there.
+func (m PickerModel) Init() tea.Cmd { return (&m).PreviewCmd() }
 
 // Update handles key events. Implementation grows across the next few tasks.
 func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -371,8 +374,10 @@ func (m PickerModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 					a.Expanded = false
 					next := m.CloseVisible()
 					m.cursor = closeNavAt(next, closeIndexOf(next, a))
+					m.previewScroll = 0
+					m.previewScrollX = 0
 					(&m).ensureManifest()
-					return m, nil
+					return m, (&m).PreviewCmd()
 				}
 			}
 			return m, nil
@@ -786,16 +791,22 @@ func (m PickerModel) previewSHA() string {
 	return p.ScrollbackSHA
 }
 
-// closeCursorSHA returns the scrollback hash of the pane the cursor's close
-// took down, or "" when the cursor is not on a pane-scoped close. Only a pane
-// close has one pane's worth of output to show; a window or session close is
-// previewed as a layout map instead.
+// closeCursorSHA resolves the cursor's close context and returns its scrollback
+// hash. renderClosePreview has the context in hand already and calls
+// closeSHAFor directly rather than flattening the tree a second time.
 func (m PickerModel) closeCursorSHA() string {
 	vis := m.CloseVisible()
 	if m.cursor < 0 || m.cursor >= len(vis) {
 		return ""
 	}
-	cc := m.CloseContextFor(vis[m.cursor].EventID)
+	return closeSHAFor(m.CloseContextFor(vis[m.cursor].EventID))
+}
+
+// closeSHAFor returns the scrollback hash of the pane cc's close took down, or
+// "" when cc is not a pane-scoped close. Only a pane close has one pane's worth
+// of output to show; a window or session close is previewed as a layout map
+// instead.
+func closeSHAFor(cc CloseContext) string {
 	if cc.Placement.Scope != "pane" || cc.Placement.PaneID == "" {
 		return ""
 	}

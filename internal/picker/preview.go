@@ -128,7 +128,7 @@ func (m PickerModel) renderClosePreview(width int) string {
 	}
 
 	cc := m.CloseContextFor(n.EventID)
-	if sha := m.closeCursorSHA(); sha != "" {
+	if sha := closeSHAFor(cc); sha != "" {
 		if err := m.scrollbackErrors[sha]; err != nil {
 			return frame.Render(footerWarn.Render("(scrollback file missing: " + err.Error() + ")"))
 		}
@@ -138,6 +138,10 @@ func (m PickerModel) renderClosePreview(width int) string {
 		if m.loadingSHAs[sha] {
 			return frame.Render(rowDim.Render("(loading scrollback…)"))
 		}
+		// The pane has scrollback but no load is in flight. Say so rather than
+		// falling through to the map, which would silently change content type
+		// once a load lands.
+		return frame.Render(rowDim.Render("(scrollback pending)"))
 	}
 	w := closePreviewWindow(cc)
 	if w == nil {
@@ -155,6 +159,11 @@ func (m PickerModel) renderClosePreview(width int) string {
 func closePreviewWindow(cc CloseContext) *snapshot.Window {
 	for i := range cc.SubManifest.Sessions {
 		s := &cc.SubManifest.Sessions[i]
+		// Window indexes are only unique within a session, so a sub-manifest
+		// carrying more than one would otherwise match the wrong window.
+		if cc.Placement.Session != "" && s.Name != cc.Placement.Session {
+			continue
+		}
 		for j := range s.Windows {
 			if cc.Placement.Scope == "session" {
 				return &s.Windows[j]
