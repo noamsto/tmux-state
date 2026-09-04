@@ -286,3 +286,74 @@ func TestCloseRow_StateRendersAsAParenthesisedTag(t *testing.T) {
 		}
 	}
 }
+
+func TestRestoreSentence(t *testing.T) {
+	man := snapshot.Manifest{Sessions: []snapshot.Session{{
+		Name:    "lazytmux",
+		Windows: []snapshot.Window{{Index: 3, Name: "docs"}, {Index: 4, Name: "src"}},
+	}}}
+	now := time.UnixMilli(1_000_000_000)
+	ts := now.Add(-22 * time.Minute).UnixMilli()
+
+	cases := []struct {
+		name  string
+		place ClosePlacement
+		want  []string
+	}{
+		{
+			name:  "window",
+			place: ClosePlacement{Session: "lazytmux", WindowIndex: 3, WindowName: "docs", Scope: "window", PaneCount: 2},
+			want: []string{
+				"↵ reopens window docs",
+				"  in lazytmux at index 3",
+				"2 panes · closed 22m ago",
+			},
+		},
+		{
+			name:  "pane",
+			place: ClosePlacement{Session: "lazytmux", WindowIndex: 3, WindowName: "docs", Scope: "pane"},
+			want: []string{
+				"↵ reopens a pane in lazytmux:3",
+				"closed 22m ago",
+			},
+		},
+		{
+			name:  "session",
+			place: ClosePlacement{Session: "lazytmux", Scope: "session"},
+			want: []string{
+				"↵ reopens session lazytmux (2 windows)",
+				"closed 22m ago",
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := restoreSentence(tc.place, man, now, ts)
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %d lines %q, want %d %q", len(got), got, len(tc.want), tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("line %d = %q, want %q", i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestHumanAge(t *testing.T) {
+	cases := []struct {
+		in   time.Duration
+		want string
+	}{
+		{30 * time.Second, "just now"},
+		{22 * time.Minute, "22m ago"},
+		{3 * time.Hour, "3h ago"},
+		{50 * time.Hour, "2d ago"},
+	}
+	for _, tc := range cases {
+		if got := humanAge(tc.in); got != tc.want {
+			t.Errorf("humanAge(%v) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}

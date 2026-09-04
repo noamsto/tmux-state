@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -147,10 +148,20 @@ func (m PickerModel) renderClosePreview(width int) string {
 	if w == nil {
 		return frame.Render(rowDim.Render("(nothing captured for this close)"))
 	}
-	if art := m.renderWindowMap(w, innerWidth, innerHeight); art != "" {
-		return frame.Render(art)
+	sentence := restoreSentence(cc.Placement, cc.SubManifest, time.Now(), n.Ts)
+	// Reserve the sentence's rows out of the map's height so the frame does not
+	// wrap — a lipgloss frame pads short content but never clips overflow.
+	mapHeight := innerHeight - len(sentence) - 1
+	body := rowDim.Render("(no layout captured for this window)")
+	if mapHeight > 0 {
+		if art := m.renderWindowMap(w, innerWidth, mapHeight); art != "" {
+			body = art
+		}
 	}
-	return frame.Render(rowDim.Render("(no layout captured for this window)"))
+	for _, line := range sentence {
+		body += "\n" + rowDim.Render(ansi.Truncate(line, innerWidth, "…"))
+	}
+	return frame.Render(body)
 }
 
 // closePreviewWindow returns the window the preview should draw: the one the
@@ -306,6 +317,65 @@ func (m PickerModel) renderWindowMap(w *snapshot.Window, innerWidth, innerHeight
 	}
 	art := panemap.Render(g, innerWidth, innerHeight-1, label, marked)
 	return rowDim.Render(ansi.Truncate(title, innerWidth, "…")) + "\n" + art
+}
+
+// restoreSentence states what Enter on this close would do, in the terms the
+// restore path actually honours: a window goes back to its original index, so
+// naming the index here is a promise rather than a guess.
+func restoreSentence(p ClosePlacement, man snapshot.Manifest, now time.Time, ts int64) []string {
+	var out []string
+	switch p.Scope {
+	case "window":
+		out = append(out,
+			"↵ reopens window "+snapshot.StripFormat(p.WindowName),
+			fmt.Sprintf("  in %s at index %d", p.Session, p.WindowIndex),
+		)
+	case "pane":
+		out = append(out, fmt.Sprintf("↵ reopens a pane in %s:%d", p.Session, p.WindowIndex))
+	case "session":
+		out = append(out, fmt.Sprintf("↵ reopens session %s (%s)", p.Session, countPhrase(countWindows(man), "window")))
+	default:
+		return nil
+	}
+
+	age := "closed " + humanAge(now.Sub(time.UnixMilli(ts)))
+	if p.PaneCount > 0 {
+		age = countPhrase(p.PaneCount, "pane") + " · " + age
+	}
+	return append(out, age)
+}
+
+// humanAge renders a duration as the coarsest unit that still reads true.
+// The row already carries the wall-clock time; this is the "and how long ago
+// was that" the wall clock cannot answer once a close is a day old.
+func humanAge(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd ago", int(d.Hours())/24)
+	}
+}
+
+// countPhrase renders "1 pane" / "2 panes".
+func countPhrase(n int, noun string) string {
+	if n == 1 {
+		return fmt.Sprintf("%d %s", n, noun)
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
+}
+
+// countWindows totals the windows a manifest would restore.
+func countWindows(man snapshot.Manifest) int {
+	n := 0
+	for _, s := range man.Sessions {
+		n += len(s.Windows)
+	}
+	return n
 }
 
 // paneByID returns the pane whose tmux id is "%<n>", the handle the layout
