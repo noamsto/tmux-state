@@ -9,8 +9,10 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/noamsto/tmux-remux/internal/scrollback"
 	"github.com/noamsto/tmux-remux/internal/snapshot"
@@ -826,5 +828,86 @@ func TestPickerModel_CloseModeLeftLandsOnEventRowAboveCollapsedWindow(t *testing
 	}
 	if !m.loadingSHAs["aaa"] {
 		t.Error("Left did not schedule the scrollback load for the event row it landed on")
+	}
+}
+
+// closePreviewFrameFixture builds a single-close ModeClose model whose sentence
+// length is controlled by scope (window: 3 lines, pane/session: 2 lines) and
+// whose session/window name is long enough to need truncation.
+func closePreviewFrameFixture(t *testing.T, scope string) PickerModel {
+	t.Helper()
+	longName := "a-really-long-window-name-that-will-not-fit-in-any-narrow-panel-at-all"
+	sub := snapshot.Manifest{
+		V: 1,
+		Sessions: []snapshot.Session{{
+			Name: "demo-" + longName,
+			Windows: []snapshot.Window{{
+				Index:  1,
+				Name:   longName,
+				Layout: "1cb4,80x24,0,0[80x11,0,0,0,80x12,0,12,1]",
+				Panes: []snapshot.Pane{
+					{Index: 0, ID: "%0", Command: "fish"},
+					{Index: 1, ID: "%1", Command: "agent-work"},
+				},
+			}},
+		}},
+	}
+	ev := store.Event{ID: 1, Ts: time.Now().UnixMilli(), Kind: "window-unlinked"}
+	ctxs := map[int64]CloseContext{1: {
+		Label: "w",
+		Placement: ClosePlacement{
+			Session: "demo-" + longName, WindowIndex: 1, WindowName: longName,
+			Scope: scope, PaneCount: 2,
+		},
+		SubManifest: sub,
+	}}
+	m := NewPickerModel(ModeClose, []store.Event{ev}, nil, nil)
+	m.SetCloseContexts(ctxs)
+	m.SetCloseTree(BuildCloseTree([]store.Event{ev}, ctxs, "demo-"+longName, nil))
+	m.Bootstrap()
+	return m
+}
+
+// TestRenderClosePreview_NeverOverflowsFrame guards renderClosePreview's box
+// math the same way TestRenderList/TestRenderCloseTree guard theirs: a
+// lipgloss frame pads short content but does not clip overflow, so a body
+// with more lines than previewInnerHeight() pushes the closing border past
+// the requested height (MaxHeight then hard-truncates the render, dropping
+// that border row and cutting the last content line off mid-string). Only
+// widths in the stacksPanel range (80-119) halve panelFrameHeight enough to
+// drive previewInnerHeight() down to 1-4; a narrow, unstacked width and a
+// wide, comfortable one cover truncation of the long window/session name.
+func TestRenderClosePreview_NeverOverflowsFrame(t *testing.T) {
+	applyTheme(NewTheme())
+	sizes := []struct{ w, h int }{
+		{90, 6},   // bodyHeight floor 5 -> previewInnerHeight 1
+		{90, 8},   // previewInnerHeight 2
+		{90, 10},  // previewInnerHeight 3
+		{90, 12},  // previewInnerHeight 4
+		{90, 30},  // comfortable, stacked
+		{40, 20},  // narrow, unstacked
+		{160, 30}, // wide, unstacked, comfortable
+	}
+	for _, scope := range []string{"window", "pane"} {
+		m := closePreviewFrameFixture(t, scope)
+		for _, sz := range sizes {
+			m.width, m.height = sz.w, sz.h
+			out := m.renderClosePreview(sz.w)
+			wantH := m.panelFrameHeight()
+			if got := lipgloss.Height(out); got != wantH {
+				t.Errorf("scope=%s w=%d h=%d: rendered height=%d, want %d\n%s", scope, sz.w, sz.h, got, wantH, out)
+			}
+			if got := lipgloss.Width(out); got != sz.w {
+				t.Errorf("scope=%s w=%d h=%d: rendered width=%d, want %d", scope, sz.w, sz.h, got, sz.w)
+			}
+			// MaxHeight truncates the *line list*, not the overflow: when the
+			// body already has more lines than the frame's interior, the
+			// bottom border row is the one that gets cut. Assert it survives.
+			rows := strings.Split(out, "\n")
+			last := rows[len(rows)-1]
+			if !strings.ContainsRune(last, '╰') || !strings.ContainsRune(last, '╯') {
+				t.Errorf("scope=%s w=%d h=%d: frame did not close, last row is %q\n%s", scope, sz.w, sz.h, last, out)
+			}
+		}
 	}
 }

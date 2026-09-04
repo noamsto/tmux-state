@@ -149,19 +149,35 @@ func (m PickerModel) renderClosePreview(width int) string {
 		return frame.Render(rowDim.Render("(nothing captured for this close)"))
 	}
 	sentence := restoreSentence(cc.Placement, cc.SubManifest, time.Now(), n.Ts)
-	// Reserve the sentence's rows out of the map's height so the frame does not
-	// wrap — a lipgloss frame pads short content but never clips overflow.
-	mapHeight := innerHeight - len(sentence) - 1
-	body := rowDim.Render("(no layout captured for this window)")
-	if mapHeight > 0 {
+	// A lipgloss frame pads short content but does not clip overflow — once the
+	// body already has more lines than fit, MaxHeight hard-truncates the line
+	// list, which drops the closing border row rather than the excess content.
+	// So the body must never exceed innerHeight lines. The sentence is the only
+	// thing that says what Enter would do; the map is decoration. So when the
+	// frame is too short for both, drop map rows first, and truncate the
+	// sentence itself only once even that alone does not fit.
+	if len(sentence) > innerHeight {
+		sentence = sentence[:innerHeight]
+	}
+	mapHeight := innerHeight - len(sentence)
+	var lines []string
+	switch {
+	case mapHeight >= 2:
+		// renderWindowMap always emits a title line plus at least one map line
+		// (art, or its own "no layout" fallback), so it needs 2 rows of budget
+		// before it's called — at mapHeight==1 it would overflow by itself.
 		if art := m.renderWindowMap(w, innerWidth, mapHeight); art != "" {
-			body = art
+			lines = strings.Split(art, "\n")
+		} else {
+			lines = []string{rowDim.Render("(no layout captured for this window)")}
 		}
+	case mapHeight == 1:
+		lines = []string{rowDim.Render("(no layout captured for this window)")}
 	}
 	for _, line := range sentence {
-		body += "\n" + rowDim.Render(ansi.Truncate(line, innerWidth, "…"))
+		lines = append(lines, rowDim.Render(ansi.Truncate(line, innerWidth, "…")))
 	}
-	return frame.Render(body)
+	return frame.Render(strings.Join(lines, "\n"))
 }
 
 // closePreviewWindow returns the window the preview should draw: the one the
