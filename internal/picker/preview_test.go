@@ -763,6 +763,27 @@ func TestClosePreviewWindow_SessionNameMismatchFallsBack(t *testing.T) {
 	}
 }
 
+// The rename-tolerance fallback drops the session-name filter entirely, which
+// is only safe when the sub-manifest holds exactly one session — with more
+// than one, "match nothing" can pick a window that belongs to a session
+// other than the one that closed. A session-scope close whose own name isn't
+// in the sub-manifest at all (not reachable in production today: each close
+// event carries its own single-session sub-manifest) must not fall back to
+// drawing an unrelated session's window under its restore sentence.
+func TestClosePreviewWindow_MultiSessionSubManifestDoesNotFallBack(t *testing.T) {
+	cc := CloseContext{
+		Label:     "session: agentdetect-test-2612860",
+		Placement: ClosePlacement{Session: "agentdetect-test-2612860", Scope: "session"},
+		SubManifest: snapshot.Manifest{Sessions: []snapshot.Session{
+			{Name: "dispatcher", Windows: []snapshot.Window{{Index: 2, Name: "bump-model-map"}}},
+			{Name: "other", Windows: []snapshot.Window{{Index: 0, Name: "fish"}}},
+		}},
+	}
+	if w := closePreviewWindow(cc); w != nil {
+		t.Errorf("closePreviewWindow = %+v, want nil: a multi-session sub-manifest must not fall back to an unrelated session's window", w)
+	}
+}
+
 // Left can collapse a window row and land the cursor on an *event* row above
 // it — not just on a pane row it collapsed from. Two pane closes in two
 // windows of one other-session group produce that shape: collapsing the
@@ -815,7 +836,13 @@ func TestPickerModel_CloseModeLeftLandsOnEventRowAboveCollapsedWindow(t *testing
 
 // closePreviewFrameFixture builds a single-close ModeClose model whose sentence
 // length is controlled by scope (window: 3 lines, pane/session: 2 lines) and
-// whose session/window name is long enough to need truncation.
+// whose session/window name is long enough to need truncation. scope
+// "missing" uses the window placement (the longest sentence, so the tightest
+// budget) but strips the session's windows from the sub-manifest, so
+// closePreviewWindow finds nothing and renderClosePreview takes its "nothing
+// captured" branch instead of the map. The session itself is kept (a
+// zero-session sub-manifest makes BuildCloseTree hide the row entirely, per
+// closetree.go's "nothing to restore" rule — a different case than this one).
 func closePreviewFrameFixture(t *testing.T, scope string) PickerModel {
 	t.Helper()
 	longName := "a-really-long-window-name-that-will-not-fit-in-any-narrow-panel-at-all"
@@ -834,12 +861,17 @@ func closePreviewFrameFixture(t *testing.T, scope string) PickerModel {
 			}},
 		}},
 	}
+	placementScope := scope
+	if scope == "missing" {
+		placementScope = "window"
+		sub.Sessions[0].Windows = nil
+	}
 	ev := store.Event{ID: 1, Ts: time.Now().UnixMilli(), Kind: "window-unlinked"}
 	ctxs := map[int64]CloseContext{1: {
 		Label: "w",
 		Placement: ClosePlacement{
 			Session: "demo-" + longName, WindowIndex: 1, WindowName: longName,
-			Scope: scope, PaneCount: 2,
+			Scope: placementScope, PaneCount: 2,
 		},
 		SubManifest: sub,
 	}}
@@ -859,8 +891,8 @@ func closePreviewFrameFixture(t *testing.T, scope string) PickerModel {
 // mode never stacks, so the panel always takes the whole body: the shortest
 // terminal the picker will draw (bodyHeight's floor of 5) is what drives
 // previewInnerHeight() to its minimum of 3, where the map budget is 1 row for
-// the pane fixture and 0 for the window fixture (its longer restore sentence
-// leaves no room), and the restore sentence takes the rest.
+// the pane fixture and 0 for the window and missing fixtures (their longer
+// restore sentence leaves no room), and the restore sentence takes the rest.
 func TestRenderClosePreview_NeverOverflowsFrame(t *testing.T) {
 	applyTheme(NewTheme())
 	sizes := []struct{ w, h int }{
@@ -872,7 +904,7 @@ func TestRenderClosePreview_NeverOverflowsFrame(t *testing.T) {
 		{40, 20},  // narrow: below the two-column threshold
 		{160, 30}, // wide and comfortable
 	}
-	for _, scope := range []string{"window", "pane"} {
+	for _, scope := range []string{"window", "pane", "missing"} {
 		m := closePreviewFrameFixture(t, scope)
 		for _, sz := range sizes {
 			m.width, m.height = sz.w, sz.h
@@ -893,5 +925,23 @@ func TestRenderClosePreview_NeverOverflowsFrame(t *testing.T) {
 				t.Errorf("scope=%s w=%d h=%d: frame did not close, last row is %q\n%s", scope, sz.w, sz.h, last, out)
 			}
 		}
+	}
+}
+
+// TestRenderClosePreview_NothingCapturedStillSaysWhatEnterDoes guards the case
+// renderClosePreview used to render worst: with no window to draw a map for,
+// it returned the bare "(nothing captured for this close)" parenthetical and
+// nothing else — exactly where the user most needs the "↵ reopens …" sentence,
+// since there is no map to infer it from.
+func TestRenderClosePreview_NothingCapturedStillSaysWhatEnterDoes(t *testing.T) {
+	applyTheme(NewTheme())
+	m := closePreviewFrameFixture(t, "missing")
+	m.width, m.height = 90, 30
+	out := m.renderClosePreview(90)
+	if !strings.Contains(out, "nothing captured for this close") {
+		t.Errorf("missing the placeholder line entirely:\n%s", out)
+	}
+	if !strings.Contains(out, "↵ reopens window") {
+		t.Errorf("renderClosePreview did not say what Enter would do when nothing was captured:\n%s", out)
 	}
 }

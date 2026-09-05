@@ -145,33 +145,35 @@ func (m PickerModel) renderClosePreview(width int) string {
 		return frame.Render(rowDim.Render("(scrollback pending)"))
 	}
 	w := closePreviewWindow(cc)
-	if w == nil {
-		return frame.Render(rowDim.Render("(nothing captured for this close)"))
-	}
 	sentence := restoreSentence(cc.Placement, cc.SubManifest, time.Now(), n.Ts)
 	// A lipgloss frame pads short content but does not clip overflow — once the
 	// body already has more lines than fit, MaxHeight hard-truncates the line
 	// list, which drops the closing border row rather than the excess content.
 	// So the body must never exceed innerHeight lines. The sentence is the only
-	// thing that says what Enter would do; the map is decoration. So when the
-	// frame is too short for both, drop map rows first, and truncate the
-	// sentence itself only once even that alone does not fit.
+	// thing that says what Enter would do; the map (or its "nothing captured"
+	// stand-in) is decoration. So when the frame is too short for both, drop
+	// that decoration first, and truncate the sentence itself only once even
+	// that alone does not fit.
 	if len(sentence) > innerHeight {
 		sentence = sentence[:innerHeight]
 	}
-	mapHeight := innerHeight - len(sentence)
+	remaining := innerHeight - len(sentence)
 	var lines []string
 	switch {
-	case mapHeight >= 2:
+	case w == nil:
+		if remaining >= 1 {
+			lines = []string{rowDim.Render("(nothing captured for this close)")}
+		}
+	case remaining >= 2:
 		// renderWindowMap always emits a title line plus at least one map line
 		// (art, or its own "no layout" fallback), so it needs 2 rows of budget
-		// before it's called — at mapHeight==1 it would overflow by itself.
-		if art := m.renderWindowMap(w, innerWidth, mapHeight); art != "" {
+		// before it's called — at remaining==1 it would overflow by itself.
+		if art := m.renderWindowMap(w, innerWidth, remaining); art != "" {
 			lines = strings.Split(art, "\n")
 		} else {
 			lines = []string{rowDim.Render("(no layout captured for this window)")}
 		}
-	case mapHeight == 1:
+	case remaining == 1:
 		lines = []string{rowDim.Render("(no layout captured for this window)")}
 	}
 	for _, line := range sentence {
@@ -184,15 +186,22 @@ func (m PickerModel) renderClosePreview(width int) string {
 // placement names, or the sub-manifest's first window for a session close,
 // where every window came down and the first one stands for the rest.
 //
-// It prefers the session named by the placement, then falls back to scanning
-// every session in the sub-manifest. The two names are independently
-// sourced — Placement.Session from the tmux hook, the sub-manifest's from the
-// prior snapshot — and can disagree when the session was renamed in between
-// (see closeevent.OwnerSession's fallback chain); treating the name as a hard
-// filter turned that mismatch into a blank preview instead of a degraded one.
+// It prefers the session named by the placement, then falls back to dropping
+// the name filter — but only when the sub-manifest holds exactly one session,
+// so there is no other candidate it could mean. The two names are
+// independently sourced — Placement.Session from the tmux hook, the
+// sub-manifest's from the prior snapshot — and can disagree when the session
+// was renamed in between (see closeevent.OwnerSession's fallback chain);
+// treating the name as a hard filter turned that mismatch into a blank
+// preview instead of a degraded one. With more than one session in the
+// sub-manifest, dropping the filter would instead risk drawing a window that
+// belongs to a different session than the one that closed.
 func closePreviewWindow(cc CloseContext) *snapshot.Window {
 	if w := closePreviewWindowIn(cc, true); w != nil {
 		return w
+	}
+	if len(cc.SubManifest.Sessions) != 1 {
+		return nil
 	}
 	return closePreviewWindowIn(cc, false)
 }
