@@ -319,7 +319,7 @@ func renderCloseTree(m PickerModel, width, height int) string {
 // gets the same two cells of blank, so a restorable row's label lines up with
 // a scaffolding row's — but only between rows that agree on having children:
 // the expand marker ("▾ "/"▸ ") emitted just before this is present only for
-// rows with children, so a parent row's label still starts two cells left of
+// rows with children, so a parent row's label still starts two cells right of
 // a childless row's at the same depth.
 const closeMarker = "● "
 
