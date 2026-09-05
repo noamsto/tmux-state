@@ -58,6 +58,7 @@ func (k keyMap) FullHelp() [][]key.Binding {
 	}
 	return [][]key.Binding{
 		nav,
+		{k.PreviewUp, k.PreviewDown, k.PreviewLeft, k.PreviewRight},
 		{k.ToggleIdle, k.ToggleSkipRunning, k.ToggleAge},
 		{k.Enter, k.Help, k.Quit},
 	}

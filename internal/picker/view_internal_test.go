@@ -512,3 +512,19 @@ func TestPickerModel_HelpOverlayTabIsSnapshotOnly(t *testing.T) {
 		t.Errorf("snapshot mode help overlay dropped the Tab hint (%q):\n%s", tabDesc, out)
 	}
 }
+
+// TestPickerModel_HelpOverlayShowsFullKeymap pins that the `?` overlay renders
+// bubbles' FullHelp, not ShortHelp: help.Model gates on its own ShowAll field,
+// which nothing set, so the overlay always fell back to ShortHelp regardless
+// of keyMap.FullHelp's content. PreviewUp's description never appears in
+// ShortHelp, so its presence here is only possible through FullHelp.
+func TestPickerModel_HelpOverlayShowsFullKeymap(t *testing.T) {
+	applyTheme(NewTheme())
+	previewDesc := defaultKeys().PreviewUp.Help().Desc
+
+	m := PickerModel{mode: ModeSnapshot, keys: defaultKeys(), help: help.New(), showHelp: true, width: 160, height: 40}
+	out := stripANSI(m.View().Content)
+	if !strings.Contains(out, previewDesc) {
+		t.Errorf("help overlay did not render FullHelp (missing %q):\n%s", previewDesc, out)
+	}
+}

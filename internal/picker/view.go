@@ -19,7 +19,9 @@ func (m PickerModel) View() tea.View {
 		// the one place ShortHelp/FullHelp are actually consulted.
 		helpKeys := m.keys
 		helpKeys.mode = m.mode
-		v := tea.NewView(m.help.View(helpKeys))
+		hm := m.help
+		hm.ShowAll = true // this overlay is the full keymap; ShortHelp is for the footer.
+		v := tea.NewView(hm.View(helpKeys))
 		v.AltScreen = true
 		return v
 	}
@@ -313,8 +315,12 @@ func renderCloseTree(m PickerModel, width, height int) string {
 	return frame.Render(b.String())
 }
 
-// closeMarker precedes every restorable row. Scaffolding gets the same two
-// cells of blank so labels stay aligned down the column.
+// closeMarker precedes every restorable row. Scaffolding at the same depth
+// gets the same two cells of blank, so a restorable row's label lines up with
+// a scaffolding row's — but only between rows that agree on having children:
+// the expand marker ("▾ "/"▸ ") emitted just before this is present only for
+// rows with children, so a parent row's label still starts two cells left of
+// a childless row's at the same depth.
 const closeMarker = "● "
 
 // closeRow renders one tree row: guide prefix, expand marker, restore marker,
