@@ -14,7 +14,12 @@ import (
 // View renders the full picker UI. Called by Bubble Tea after every Update.
 func (m PickerModel) View() tea.View {
 	if m.showHelp {
-		v := tea.NewView(m.help.View(m.keys))
+		// m.keys.mode isn't kept in sync at construction time (it's never set
+		// by defaultKeys/NewPickerModel), so stamp the live mode on here —
+		// the one place ShortHelp/FullHelp are actually consulted.
+		helpKeys := m.keys
+		helpKeys.mode = m.mode
+		v := tea.NewView(m.help.View(helpKeys))
 		v.AltScreen = true
 		return v
 	}
@@ -176,16 +181,13 @@ func (m PickerModel) paneWidthsThree() (int, int, int) {
 	if m.mode == ModeClose {
 		// Two columns: no sub-manifest pane, since it restated the hierarchy
 		// the close tree already draws. 40% keeps the tree past its 32-cell
-		// floor for deep guide prefixes and long session labels, and the last
-		// clamp leaves the preview at least 30 cells — enough for a pane map
-		// and the restore sentence under it.
+		// floor for deep guide prefixes and long session labels, and leaves
+		// the preview at least 30 cells — enough for a pane map and the
+		// restore sentence under it. Both bounds hold automatically once
+		// width>=80 (the guard above): 2w/5>=32 and w-2w/5>=30, so no clamp
+		// is needed here — only if that threshold ever moves does one become
+		// necessary again.
 		treeW := m.width * 2 / 5
-		if treeW < 32 {
-			treeW = 32
-		}
-		if wide := m.width - 30; treeW > wide {
-			treeW = wide
-		}
 		return treeW, 0, m.width - treeW
 	}
 	if m.width < 120 {

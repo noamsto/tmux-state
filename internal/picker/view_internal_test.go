@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"charm.land/bubbles/v2/help"
 	"charm.land/lipgloss/v2"
 	"github.com/noamsto/tmux-remux/internal/snapshot"
 	"github.com/noamsto/tmux-remux/internal/store"
@@ -123,6 +124,64 @@ func TestView_CloseModeDrawsTwoFramesSideBySide(t *testing.T) {
 	}
 	if len(rows) != 1 || rows[0] != 2 {
 		t.Errorf("frame corners per row = %v, want exactly one row carrying 2:\n%s", rows, out)
+	}
+}
+
+// Snapshot mode's three-column View has been the single most important
+// invariant on this branch — every task had to avoid breaking it — but
+// nothing pinned its geometry the way TestView_CloseModeDrawsTwoFramesSideBySide
+// pins close mode's. Checks, at several widths and heights: the render is
+// exactly terminal-sized, all three frames open on row 0, and the bottom
+// border row survives intact. A lipgloss.Height(out) == h check alone would
+// not catch a dropped border — lipgloss v2's MaxHeight hard-truncates the
+// line list rather than clipping content — so this asserts the corners
+// directly, the same way TestRenderClosePreview_NeverOverflowsFrame does.
+func TestView_SnapshotModeThreeColumnGeometry(t *testing.T) {
+	applyTheme(NewTheme())
+	events := []store.Event{{
+		ID: 1, Ts: time.Now().UnixMilli(), Kind: "snapshot",
+		ManifestJSON: `{"v":1,"sessions":[{"name":"s","windows":[{"index":1,"name":"w","panes":[{"index":0,"command":"fish"}]}]}]}`,
+	}}
+	sizes := []struct{ w, h int }{
+		{120, 24}, {120, 40}, {160, 30}, {200, 50},
+	}
+	for _, sz := range sizes {
+		m := NewPickerModel(ModeSnapshot, events, nil, nil)
+		m.Bootstrap()
+		m.width, m.height = sz.w, sz.h
+
+		out := m.View().Content
+		if got := lipgloss.Height(out); got != sz.h {
+			t.Errorf("w=%d h=%d: rendered height=%d, want %d\n%s", sz.w, sz.h, got, sz.h, out)
+		}
+		if got := lipgloss.Width(out); got != sz.w {
+			t.Errorf("w=%d h=%d: rendered width=%d, want %d", sz.w, sz.h, got, sz.w)
+		}
+
+		rows := strings.Split(out, "\n")
+		var topRows []int
+		for i, line := range rows {
+			if n := strings.Count(line, "╭"); n > 0 {
+				topRows = append(topRows, n)
+				if i != 0 {
+					t.Errorf("w=%d h=%d: a frame opens on row %d; want every frame to open on row 0:\n%s", sz.w, sz.h, i, out)
+				}
+			}
+		}
+		if len(topRows) != 1 || topRows[0] != 3 {
+			t.Errorf("w=%d h=%d: frame corners per row = %v, want exactly one row carrying 3:\n%s", sz.w, sz.h, topRows, out)
+		}
+
+		var closed bool
+		for _, line := range rows {
+			if strings.Count(line, "╰") == 3 && strings.Count(line, "╯") == 3 {
+				closed = true
+				break
+			}
+		}
+		if !closed {
+			t.Errorf("w=%d h=%d: no row closes all three frames (missing ╰/╯):\n%s", sz.w, sz.h, out)
+		}
 	}
 }
 
@@ -427,5 +486,29 @@ func TestRenderFooter_TabHintIsSnapshotOnly(t *testing.T) {
 	}
 	if !strings.Contains(foot, scrollKey+":") {
 		t.Errorf("snapshot footer dropped the preview-scroll hint (%q):\n%s", scrollKey, foot)
+	}
+}
+
+// Tab is snapshot-only in the footer (see above); the `?` help overlay must
+// agree, since it lists what a key does independent of the footer's width
+// gating. Close mode has no second tree for Tab to reach — it must not appear
+// in close mode's help, and must still appear in snapshot mode's.
+func TestPickerModel_HelpOverlayTabIsSnapshotOnly(t *testing.T) {
+	applyTheme(NewTheme())
+	// "switch pane" is Tab's help description and appears nowhere else in the
+	// keymap, so its presence pins Tab specifically rather than any binding
+	// whose key label happens to be a common substring.
+	tabDesc := defaultKeys().Tab.Help().Desc
+
+	closeM := PickerModel{mode: ModeClose, closeTree: closeTreeFixture(), keys: defaultKeys(), help: help.New(), showHelp: true, width: 160, height: 40}
+	out := stripANSI(closeM.View().Content)
+	if strings.Contains(out, tabDesc) {
+		t.Errorf("close mode help overlay advertises Tab (%q):\n%s", tabDesc, out)
+	}
+
+	snapM := PickerModel{mode: ModeSnapshot, keys: defaultKeys(), help: help.New(), showHelp: true, width: 160, height: 40}
+	out = stripANSI(snapM.View().Content)
+	if !strings.Contains(out, tabDesc) {
+		t.Errorf("snapshot mode help overlay dropped the Tab hint (%q):\n%s", tabDesc, out)
 	}
 }

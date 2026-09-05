@@ -858,12 +858,13 @@ func closePreviewFrameFixture(t *testing.T, scope string) PickerModel {
 // that border row and cutting the last content line off mid-string). Close
 // mode never stacks, so the panel always takes the whole body: the shortest
 // terminal the picker will draw (bodyHeight's floor of 5) is what drives
-// previewInnerHeight() to its minimum of 3, where the map budget is 1 row and
-// the restore sentence takes the rest.
+// previewInnerHeight() to its minimum of 3, where the map budget is 1 row for
+// the pane fixture and 0 for the window fixture (its longer restore sentence
+// leaves no room), and the restore sentence takes the rest.
 func TestRenderClosePreview_NeverOverflowsFrame(t *testing.T) {
 	applyTheme(NewTheme())
 	sizes := []struct{ w, h int }{
-		{90, 6},   // bodyHeight floor 5 -> previewInnerHeight 3, map budget 1
+		{90, 6},   // bodyHeight floor 5 -> previewInnerHeight 3: map budget 1 (pane) / 0 (window)
 		{90, 8},   // previewInnerHeight 5
 		{90, 10},  // previewInnerHeight 7
 		{90, 12},  // previewInnerHeight 9
