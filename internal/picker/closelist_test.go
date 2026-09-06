@@ -96,7 +96,7 @@ func TestBuildCloseList_SectionAssignment(t *testing.T) {
 		3: sessionCtx("mono", oneWindow("recreate")),
 	}
 
-	rows := picker.BuildCloseList(evs, ctxs, "mono", nil)
+	rows := picker.BuildCloseList(evs, ctxs, "mono")
 
 	if got, want := sections(rows), []string{"THIS SESSION · mono", "OTHER SESSIONS"}; !equalStrings(got, want) {
 		t.Fatalf("sections = %v, want %v", got, want)
@@ -126,7 +126,7 @@ func TestBuildCloseList_NewestFirstWithinSection(t *testing.T) {
 		3: windowCtx("other", 3, "c", "fish", "/c"),
 	}
 
-	rows := picker.BuildCloseList(evs, ctxs, "mono", nil)
+	rows := picker.BuildCloseList(evs, ctxs, "mono")
 	closes := closeRows(rows)
 
 	ids := []int64{closes[0].EventID, closes[1].EventID, closes[2].EventID}
@@ -139,7 +139,7 @@ func TestBuildCloseList_HeaderSuppressedWhenSectionEmpty(t *testing.T) {
 	evs := []store.Event{{ID: 1, Ts: 100}}
 	ctxs := map[int64]picker.CloseContext{1: windowCtx("lazytmux", 1, "shell", "fish", "/home/lazytmux")}
 
-	rows := picker.BuildCloseList(evs, ctxs, "mono", nil)
+	rows := picker.BuildCloseList(evs, ctxs, "mono")
 
 	if got, want := sections(rows), []string{"OTHER SESSIONS"}; !equalStrings(got, want) {
 		t.Fatalf("sections = %v, want %v (no this-session closes)", got, want)
@@ -156,7 +156,7 @@ func TestBuildCloseList_CollapsesIdenticalPair(t *testing.T) {
 		2: windowCtx("mono", 1, "main", "claude", "/home/mono"),
 	}
 
-	rows := picker.BuildCloseList(evs, ctxs, "mono", nil)
+	rows := picker.BuildCloseList(evs, ctxs, "mono")
 	closes := closeRows(rows)
 
 	if len(closes) != 1 {
@@ -183,7 +183,7 @@ func TestBuildCloseList_DoesNotCollapseDifferingCwd(t *testing.T) {
 		2: windowCtx("mono", 1, "main", "claude", "/home/mono/repo-b"),
 	}
 
-	rows := picker.BuildCloseList(evs, ctxs, "mono", nil)
+	rows := picker.BuildCloseList(evs, ctxs, "mono")
 	closes := closeRows(rows)
 
 	if len(closes) != 2 {
@@ -214,7 +214,7 @@ func TestBuildCloseList_PaneScopeKeysOnTheDiedPane(t *testing.T) {
 		3: paneCtx("mono", 1, "main", "%died2", "vim", "/home/mono/other"),
 	}
 
-	rows := picker.BuildCloseList(evs, ctxs, "mono", nil)
+	rows := picker.BuildCloseList(evs, ctxs, "mono")
 	closes := closeRows(rows)
 
 	if len(closes) != 2 {
@@ -244,7 +244,7 @@ func TestBuildCloseList_EightSessionCloseCollapse(t *testing.T) {
 		ctxs[id] = sessionCtx("tmux-remux", oneWindow("agentdetect-"+string(rune('a'+i))))
 	}
 
-	rows := picker.BuildCloseList(evs, ctxs, "mono", nil)
+	rows := picker.BuildCloseList(evs, ctxs, "mono")
 	closes := closeRows(rows)
 
 	if len(closes) != 1 {
@@ -271,7 +271,7 @@ func TestBuildCloseList_ExcludesEmptySubManifest(t *testing.T) {
 		// Event 2 has no context at all: unrecoverable, must be excluded.
 	}
 
-	rows := picker.BuildCloseList(evs, ctxs, "mono", nil)
+	rows := picker.BuildCloseList(evs, ctxs, "mono")
 	closes := closeRows(rows)
 
 	if len(closes) != 1 || closes[0].EventID != 1 {

@@ -2,6 +2,7 @@ package picker
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -9,6 +10,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/noamsto/tmux-remux/internal/snapshot"
 )
 
 // View renders the full picker UI. Called by Bubble Tea after every Update.
@@ -565,4 +567,248 @@ func shortReason(r string) string {
 	// An unmapped reason keeps its own words; only the hook: prefix goes, since
 	// every row in this list is a save and the prefix distinguishes nothing.
 	return strings.TrimPrefix(r, "hook:")
+}
+
+// closeListView holds the facts a single flat close row cannot work out on its
+// own: the contexts its columns read, which sessions are still alive, and —
+// the reason this type exists — each session's modal cwd, which decides
+// whether the cwd column earns its width on a given row.
+type closeListView struct {
+	ctxs  map[int64]CloseContext
+	live  map[string]bool
+	now   time.Time
+	tails map[int64]string // EventID → cwd tail; absent when elided
+	// widest is the widest tail in the list, so rows that elide theirs still
+	// pad to keep the columns right of it aligned. 0 drops the column.
+	widest int
+}
+
+// newCloseListView precomputes the per-list column facts for rows.
+func newCloseListView(rows []CloseRow, ctxs map[int64]CloseContext, live map[string]bool, now time.Time) closeListView {
+	v := closeListView{ctxs: ctxs, live: live, now: now, tails: map[int64]string{}}
+
+	counts := map[string]map[string]int{}
+	cwds := map[int64]string{}
+	for _, r := range rows {
+		if !r.Selectable() {
+			continue
+		}
+		_, cwd := closedPaneInfo(ctxs[r.EventID])
+		if cwd == "" {
+			continue
+		}
+		cwds[r.EventID] = cwd
+		if counts[r.Session] == nil {
+			counts[r.Session] = map[string]int{}
+		}
+		counts[r.Session][cwd]++
+	}
+
+	modal := make(map[string]string, len(counts))
+	for session, byCwd := range counts {
+		modal[session] = modalCwd(byCwd)
+	}
+	for _, r := range rows {
+		cwd, ok := cwds[r.EventID]
+		if !ok || cwd == modal[r.Session] {
+			continue
+		}
+		tail := cwdTail(cwd, modal[r.Session])
+		v.tails[r.EventID] = tail
+		if w := lipgloss.Width(tail); w > v.widest {
+			v.widest = w
+		}
+	}
+	return v
+}
+
+// modalCwd returns the cwd a session's closes are usually in — the one the
+// column would repeat down the list, and therefore the one worth eliding.
+// A tie has no such background: both cwds discriminate, so neither is elided
+// and the function returns "". A session with a single close ties with
+// nothing and elides, since there is nothing to tell apart.
+func modalCwd(byCwd map[string]int) string {
+	best, bestN, tied := "", 0, false
+	for cwd, n := range byCwd {
+		switch {
+		case n > bestN:
+			best, bestN, tied = cwd, n, false
+		case n == bestN:
+			tied = true
+		}
+	}
+	if tied {
+		return ""
+	}
+	return best
+}
+
+// cwdTail returns the part of cwd that modal does not already say: the path
+// segments after the two share a prefix. Falls back to the whole path when
+// there is no modal cwd, or when cwd is an ancestor of it and so has no tail
+// of its own.
+func cwdTail(cwd, modal string) string {
+	if modal == "" {
+		return cwd
+	}
+	have, want := strings.Split(cwd, "/"), strings.Split(modal, "/")
+	i := 0
+	for i < len(have) && i < len(want) && have[i] == want[i] {
+		i++
+	}
+	if i >= len(have) {
+		return cwd
+	}
+	return strings.Join(have[i:], "/")
+}
+
+// closeKindWidth pads the kind column so every row's cwd starts in the same
+// column. "session" is the longest of the three.
+const closeKindWidth = 7
+
+// renderRow renders one flat close row as a single line of exactly innerWidth
+// cells. Section headers render their text alone — no marker, since the marker
+// column means "restorable".
+func (v closeListView) renderRow(r CloseRow, innerWidth int, active bool) string {
+	if innerWidth < 1 {
+		innerWidth = 1
+	}
+	if !r.Selectable() {
+		return previewHeader.Width(innerWidth).Render(ansi.Truncate(r.Section, innerWidth, "…"))
+	}
+
+	cc := v.ctxs[r.EventID]
+	cmd, _ := closedPaneInfo(cc)
+	name := snapshot.StripFormat(r.Placement.WindowName)
+	target := "→ " + r.Session
+	if r.Scope == "session" {
+		name = fmt.Sprintf("%dw", countWindows(cc.SubManifest))
+	} else {
+		target += ":" + strconv.Itoa(r.Placement.WindowIndex)
+	}
+
+	// Defaults say nothing, so they are not printed: a shell that is fish, a
+	// window that held one pane, a session that is still running.
+	var extra []string
+	if cmd != "" && cmd != "fish" {
+		extra = append(extra, cmd)
+	}
+	if !v.live[r.Session] {
+		extra = append(extra, "(gone)")
+	}
+	if r.Placement.PaneCount > 1 {
+		extra = append(extra, fmt.Sprintf("%dp", r.Placement.PaneCount))
+	}
+
+	var right []string
+	if r.Count > 1 {
+		right = append(right, fmt.Sprintf("×%d", r.Count))
+	}
+	right = append(right, strings.TrimSuffix(humanAge(v.now.Sub(time.UnixMilli(r.Ts))), " ago"))
+	tail := strings.Join(right, " ")
+
+	line := v.layoutRow(r, name, extra, target, tail, innerWidth)
+	if active {
+		// One flat style over plain text: lipgloss v2 strips ESC bytes from
+		// pre-styled input, so a role colour nested inside rowActive's
+		// background collapses to invisible.
+		return rowActive.Width(innerWidth).Render(line)
+	}
+	return closeRowScopeStyle(r.Scope).Width(innerWidth).Render(line)
+}
+
+// layoutRow fits the columns into innerWidth by giving them up in order of
+// how little they say. The cwd column goes first — it is the one that most
+// often has nothing to say — then the name is clipped to a readable floor,
+// then the extra column, and only then is the name cut to the bone. The name
+// is defended this far because nerd-font glyph runs measure narrower than
+// they paint, so a name cut mid-run loses the words that identify it.
+func (v closeListView) layoutRow(r CloseRow, name string, extra []string, target, tail string, innerWidth int) string {
+	avail := innerWidth - lipgloss.Width(tail) - 1
+	if avail < 1 {
+		avail = 1
+	}
+
+	build := func(name string, cwdWidth int, extra []string) string {
+		cols := []string{closeMarker + fmt.Sprintf("%-*s", closeKindWidth, r.Scope)}
+		if cwdWidth > 0 {
+			cols = append(cols, fitCwd(v.tails[r.EventID], cwdWidth))
+		}
+		cols = append(cols, name)
+		cols = append(cols, extra...)
+		return strings.Join(append(cols, target), " ")
+	}
+	clip := func(line string, floor int) string {
+		budget := lipgloss.Width(name) - (lipgloss.Width(line) - avail)
+		if budget < floor {
+			budget = floor
+		}
+		return ansi.Truncate(name, budget, "…")
+	}
+
+	left := build(name, v.cwdColumnWidth(innerWidth), extra)
+	if lipgloss.Width(left) > avail {
+		left = build(name, 0, extra)
+	}
+	if lipgloss.Width(left) > avail {
+		name = clip(left, 8)
+		left = build(name, 0, extra)
+	}
+	if lipgloss.Width(left) > avail && len(extra) > 0 {
+		left = build(name, 0, nil)
+		extra = nil
+	}
+	if lipgloss.Width(left) > avail {
+		left = build(clip(left, 4), 0, extra)
+	}
+
+	line := left
+	if gap := innerWidth - lipgloss.Width(left) - lipgloss.Width(tail); gap > 0 {
+		line += strings.Repeat(" ", gap)
+	} else {
+		line += " "
+	}
+	return ansi.Truncate(line+tail, innerWidth, "…")
+}
+
+// cwdColumnWidth budgets the cwd column: as wide as the widest tail in the
+// list, but never more than a quarter of the row, and dropped entirely when
+// that quarter is too narrow to hold a meaningful path fragment.
+func (v closeListView) cwdColumnWidth(innerWidth int) int {
+	if v.widest == 0 {
+		return 0
+	}
+	budget := innerWidth / 4
+	if budget > 24 {
+		budget = 24
+	}
+	if budget < 8 {
+		return 0
+	}
+	if v.widest < budget {
+		return v.widest
+	}
+	return budget
+}
+
+// fitCwd pads or left-truncates a tail to exactly width cells. Truncation is
+// from the left, since the tail is what discriminates.
+func fitCwd(tail string, width int) string {
+	w := lipgloss.Width(tail)
+	if w <= width {
+		return tail + strings.Repeat(" ", width-w)
+	}
+	return ansi.TruncateLeft(tail, w-width+1, "…")
+}
+
+// closeRowScopeStyle colours a close row by what it would restore, matching
+// the palette the preview tree uses for the same three levels.
+func closeRowScopeStyle(scope string) lipgloss.Style {
+	switch scope {
+	case "session":
+		return nodeSession
+	case "window":
+		return nodeWindow
+	}
+	return nodePane
 }

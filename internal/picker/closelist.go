@@ -100,7 +100,7 @@ type closeGroup struct {
 //
 // evs is expected newest-first (store.ListEvents orders by ts DESC), but the
 // result does not depend on that — every section is sorted by Ts at the end.
-func BuildCloseList(evs []store.Event, ctxs map[int64]CloseContext, current string, _ map[string]bool) []CloseRow {
+func BuildCloseList(evs []store.Event, ctxs map[int64]CloseContext, current string) []CloseRow {
 	var thisGroups, otherGroups []*closeGroup
 	thisIdx := map[collapseKey]*closeGroup{}
 	otherIdx := map[collapseKey]*closeGroup{}

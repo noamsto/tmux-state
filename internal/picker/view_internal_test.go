@@ -4,9 +4,11 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"charm.land/bubbles/v2/help"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/noamsto/tmux-remux/internal/snapshot"
 	"github.com/noamsto/tmux-remux/internal/store"
 )
@@ -526,5 +528,306 @@ func TestPickerModel_HelpOverlayShowsFullKeymap(t *testing.T) {
 	out := stripANSI(m.View().Content)
 	if !strings.Contains(out, previewDesc) {
 		t.Errorf("help overlay did not render FullHelp (missing %q):\n%s", previewDesc, out)
+	}
+}
+
+// closeListFixture builds the rows and contexts the flat-row rendering tests
+// share: the current session `mono` with three closes (two in its own repo,
+// one in a worktree of it) plus a session close of a gone session whose name
+// does not match its repo.
+func closeListFixture(now time.Time) ([]CloseRow, map[int64]CloseContext, map[string]bool) {
+	const repo = "/home/noams/git/tmux-remux"
+	const worktree = "/home/noams/git/wt/feat-104"
+	evs := []store.Event{
+		{ID: 1, Ts: now.Add(-4 * time.Minute).UnixMilli()},
+		{ID: 2, Ts: now.Add(-18 * time.Hour).UnixMilli()},
+		{ID: 3, Ts: now.Add(-19 * time.Hour).UnixMilli()},
+		{ID: 4, Ts: now.Add(-48 * time.Hour).UnixMilli()},
+		{ID: 5, Ts: now.Add(-45 * time.Minute).UnixMilli()},
+	}
+	ctxs := map[int64]CloseContext{
+		1: paneCloseCtx("mono", 2, "main", "claude", repo),
+		2: windowCloseCtx("mono", 3, "docs", "fish", repo, 2),
+		3: windowCloseCtx("mono", 3, "docs", "fish", repo, 2),
+		4: paneCloseCtx("mono", 4, "code", "claude", worktree),
+		5: sessionCloseCtx("tp-g6-nix-config", 3),
+	}
+	return BuildCloseList(evs, ctxs, "mono"), ctxs, map[string]bool{"mono": true}
+}
+
+func paneCloseCtx(session string, idx int, name, cmd, cwd string) CloseContext {
+	return CloseContext{
+		Placement: ClosePlacement{Session: session, WindowIndex: idx, WindowName: name, Scope: "pane", PaneID: "%1"},
+		SubManifest: snapshot.Manifest{Sessions: []snapshot.Session{{Name: session, Windows: []snapshot.Window{{
+			Index: idx, Name: name, Panes: []snapshot.Pane{{ID: "%1", Command: cmd, Cwd: cwd}},
+		}}}}},
+	}
+}
+
+func windowCloseCtx(session string, idx int, name, cmd, cwd string, panes int) CloseContext {
+	return CloseContext{
+		Placement: ClosePlacement{Session: session, WindowIndex: idx, WindowName: name, Scope: "window", PaneCount: panes},
+		SubManifest: snapshot.Manifest{Sessions: []snapshot.Session{{Name: session, Windows: []snapshot.Window{{
+			Index: idx, Name: name, Panes: []snapshot.Pane{{ID: "%1", Command: cmd, Cwd: cwd}},
+		}}}}},
+	}
+}
+
+func sessionCloseCtx(session string, windows int) CloseContext {
+	ws := make([]snapshot.Window, windows)
+	for i := range ws {
+		ws[i] = snapshot.Window{Index: i + 1, Name: "w", Panes: []snapshot.Pane{{ID: "%1", Command: "fish", Cwd: "/home/noams"}}}
+	}
+	return CloseContext{
+		Placement:   ClosePlacement{Session: session, Scope: "session"},
+		SubManifest: snapshot.Manifest{Sessions: []snapshot.Session{{Name: session, Windows: ws}}},
+	}
+}
+
+// rowByEvent returns the close row carrying id.
+func rowByEvent(t *testing.T, rows []CloseRow, id int64) CloseRow {
+	t.Helper()
+	for _, r := range rows {
+		if r.EventID == id {
+			return r
+		}
+	}
+	t.Fatalf("no row for event %d", id)
+	return CloseRow{}
+}
+
+// TestCloseListRow_Columns pins the exact column layout at a comfortable
+// width: marker, kind, the cwd column (blank where the session's modal cwd is
+// what the close was in), name, extra, target, then a right-aligned count and
+// age. The cwd column is as wide as the widest tail in the list — 11 for
+// "wt/feat-104" — so a row that elides it still pads to keep names aligned.
+func TestCloseListRow_Columns(t *testing.T) {
+	applyTheme(NewTheme())
+	now := time.Now()
+	rows, ctxs, live := closeListFixture(now)
+	v := newCloseListView(rows, ctxs, live, now)
+
+	blankCwd := strings.Repeat(" ", 11)
+	tests := []struct {
+		name string
+		id   int64
+		want string
+	}{
+		{
+			name: "pane close in the session's modal cwd",
+			id:   1,
+			want: "● pane    " + blankCwd + " main claude → mono:2" + strings.Repeat(" ", 32) + "4m",
+		},
+		{
+			name: "collapsed two-pane window close",
+			id:   2,
+			want: "● window  " + blankCwd + " docs 2p → mono:3" + strings.Repeat(" ", 32) + "×2 18h",
+		},
+		{
+			name: "worktree close shows the discriminating tail",
+			id:   4,
+			want: "● pane    wt/feat-104 code claude → mono:4" + strings.Repeat(" ", 32) + "2d",
+		},
+		{
+			name: "session close names its window count and targets the session",
+			id:   5,
+			want: "● session " + blankCwd + " 3w (gone) → tp-g6-nix-config" + strings.Repeat(" ", 23) + "45m",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ansi.Strip(v.renderRow(rowByEvent(t, rows, tt.id), 76, false))
+			if got != tt.want {
+				t.Errorf("renderRow:\n got %q\nwant %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestCloseListRow_HeaderCarriesNoMarker keeps section headers structural:
+// they render their text and nothing else, so the ● column reads as "this is
+// restorable".
+func TestCloseListRow_HeaderCarriesNoMarker(t *testing.T) {
+	applyTheme(NewTheme())
+	now := time.Now()
+	rows, ctxs, live := closeListFixture(now)
+	v := newCloseListView(rows, ctxs, live, now)
+	got := strings.TrimRight(ansi.Strip(v.renderRow(rows[0], 76, false)), " ")
+	if got != "THIS SESSION · mono" {
+		t.Errorf("header row = %q, want %q", got, "THIS SESSION · mono")
+	}
+}
+
+// TestCloseListRow_ModalCwdIsNotTheSessionName is the prototype's bug: keying
+// elision on "does the cwd's basename match the session name" prints
+// "nix-config" on every row of session tp-g6-nix-config. Keying on the
+// session's modal cwd prints nothing, because there is nothing to
+// discriminate.
+func TestCloseListRow_ModalCwdIsNotTheSessionName(t *testing.T) {
+	applyTheme(NewTheme())
+	now := time.Now()
+	evs := []store.Event{{ID: 1, Ts: now.UnixMilli()}, {ID: 2, Ts: now.UnixMilli() - 1000}}
+	ctxs := map[int64]CloseContext{
+		1: paneCloseCtx("tp-g6-nix-config", 1, "edit", "nvim", "/home/noams/nix-config"),
+		2: paneCloseCtx("tp-g6-nix-config", 2, "shell", "claude", "/home/noams/nix-config"),
+	}
+	rows := BuildCloseList(evs, ctxs, "tp-g6-nix-config")
+	v := newCloseListView(rows, ctxs, map[string]bool{"tp-g6-nix-config": true}, now)
+	for _, r := range rows {
+		if !r.Selectable() {
+			continue
+		}
+		if got := ansi.Strip(v.renderRow(r, 76, false)); strings.Contains(got, "nix-config →") || strings.Contains(got, "nix-config edit") || strings.Contains(got, "nix-config shell") {
+			t.Errorf("cwd column should be elided, got %q", got)
+		}
+	}
+}
+
+// TestCloseListRow_TieHasNoModalCwd: two closes, two cwds, no majority. Neither
+// is the boring background, so both rows show their path rather than one being
+// arbitrarily declared normal.
+func TestCloseListRow_TieHasNoModalCwd(t *testing.T) {
+	applyTheme(NewTheme())
+	now := time.Now()
+	evs := []store.Event{{ID: 1, Ts: now.UnixMilli()}, {ID: 2, Ts: now.UnixMilli() - 1000}}
+	ctxs := map[int64]CloseContext{
+		1: paneCloseCtx("duo", 1, "a", "nvim", "/srv/alpha"),
+		2: paneCloseCtx("duo", 2, "b", "nvim", "/srv/beta"),
+	}
+	rows := BuildCloseList(evs, ctxs, "duo")
+	v := newCloseListView(rows, ctxs, map[string]bool{"duo": true}, now)
+	for _, want := range []string{"/srv/alpha", "/srv/beta"} {
+		found := false
+		for _, r := range rows {
+			if r.Selectable() && strings.Contains(ansi.Strip(v.renderRow(r, 76, false)), want) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("tied cwd %q should be shown on its row", want)
+		}
+	}
+}
+
+// TestCloseListRow_GlyphDenseNameTruncatesCleanly: real window names are runs
+// of nerd-font glyphs. Truncating one must leave a whole grapheme and a row
+// that is still exactly one line of the requested width.
+func TestCloseListRow_GlyphDenseNameTruncatesCleanly(t *testing.T) {
+	applyTheme(NewTheme())
+	now := time.Now()
+	const glyphy = "#[fg=#94e2d5]󰊤 #511 🧠 󰒲 󰗠 #517"
+	evs := []store.Event{{ID: 1, Ts: now.UnixMilli()}}
+	ctxs := map[int64]CloseContext{1: paneCloseCtx("mono", 7, glyphy, "claude", "/home/noams/git/tmux-remux")}
+	rows := BuildCloseList(evs, ctxs, "mono")
+	v := newCloseListView(rows, ctxs, map[string]bool{"mono": true}, now)
+	r := rowByEvent(t, rows, 1)
+	for _, w := range []int{30, 40, 50, 76} {
+		out := v.renderRow(r, w, false)
+		plain := ansi.Strip(out)
+		if strings.Contains(plain, "#[") {
+			t.Errorf("w=%d: tmux format directive survived StripFormat: %q", w, plain)
+		}
+		if !utf8.ValidString(plain) {
+			t.Errorf("w=%d: row is not valid UTF-8: %q", w, plain)
+		}
+		for _, dangling := range []rune{'️', '︎', '‍'} {
+			if strings.ContainsRune(plain, dangling) && []rune(strings.TrimRight(plain, " "))[len([]rune(strings.TrimRight(plain, " ")))-1] == dangling {
+				t.Errorf("w=%d: row ends on a dangling combining rune: %q", w, plain)
+			}
+		}
+		if !strings.Contains(plain, "→ mono:7") {
+			t.Errorf("w=%d: target column lost to the name: %q", w, plain)
+		}
+	}
+}
+
+// TestCloseListRow_AlwaysOneLineOfExactWidth is the invariant the scroll
+// window depends on: every row, at every width, is one physical line of
+// exactly innerWidth cells.
+func TestCloseListRow_AlwaysOneLineOfExactWidth(t *testing.T) {
+	applyTheme(NewTheme())
+	now := time.Now()
+	rows, ctxs, live := closeListFixture(now)
+	v := newCloseListView(rows, ctxs, live, now)
+	for _, w := range []int{8, 12, 20, 30, 46, 60, 76, 120} {
+		for _, r := range rows {
+			for _, active := range []bool{false, true} {
+				out := v.renderRow(r, w, active)
+				if got := lipgloss.Height(out); got != 1 {
+					t.Errorf("w=%d active=%v: height=%d, want 1: %q", w, active, got, out)
+				}
+				if got := lipgloss.Width(out); got != w {
+					t.Errorf("w=%d active=%v: width=%d, want %d: %q", w, active, got, w, out)
+				}
+			}
+		}
+	}
+}
+
+// TestCloseListRow_ElidesDefaults: a fish shell, a one-pane window and a
+// session that is still running are what the column would say on nearly every
+// row, so it says nothing instead. Anything else is worth the width.
+func TestCloseListRow_ElidesDefaults(t *testing.T) {
+	applyTheme(NewTheme())
+	now := time.Now()
+	evs := []store.Event{{ID: 1, Ts: now.UnixMilli()}, {ID: 2, Ts: now.UnixMilli() - 1000}}
+	ctxs := map[int64]CloseContext{
+		1: windowCloseCtx("mono", 1, "shell", "fish", "/home/noams", 1),
+		2: windowCloseCtx("gone-one", 2, "work", "claude", "/home/noams", 2),
+	}
+	rows := BuildCloseList(evs, ctxs, "mono")
+	v := newCloseListView(rows, ctxs, map[string]bool{"mono": true}, now)
+
+	defaults := ansi.Strip(v.renderRow(rowByEvent(t, rows, 1), 76, false))
+	for _, unwanted := range []string{"fish", "1p", "(live)"} {
+		if strings.Contains(defaults, unwanted) {
+			t.Errorf("default %q should be elided, got %q", unwanted, defaults)
+		}
+	}
+	if want := "● window  shell → mono:1"; !strings.HasPrefix(defaults, want) {
+		t.Errorf("row = %q, want prefix %q", defaults, want)
+	}
+
+	notable := ansi.Strip(v.renderRow(rowByEvent(t, rows, 2), 76, false))
+	for _, wanted := range []string{"claude", "2p", "(gone)"} {
+		if !strings.Contains(notable, wanted) {
+			t.Errorf("%q should be printed, got %q", wanted, notable)
+		}
+	}
+}
+
+// TestCloseListRow_CwdYieldsBeforeTheName: when the row will not fit, the cwd
+// column is given up whole before a single cell is taken from the name. A
+// name clipped mid-glyph-run loses the words that identify the window; a
+// dropped cwd column loses a path the preview still shows.
+func TestCloseListRow_CwdYieldsBeforeTheName(t *testing.T) {
+	applyTheme(NewTheme())
+	now := time.Now()
+	const name = "release-notes-editor"
+	evs := []store.Event{
+		{ID: 1, Ts: now.UnixMilli()},
+		{ID: 2, Ts: now.UnixMilli() - 1000},
+		{ID: 3, Ts: now.UnixMilli() - 2000},
+	}
+	ctxs := map[int64]CloseContext{
+		1: paneCloseCtx("solo", 1, name, "claude", "/srv/app/wt/topic"),
+		2: paneCloseCtx("solo", 2, "sh", "claude", "/srv/app/main"),
+		3: paneCloseCtx("solo", 3, "sh", "claude", "/srv/app/main"),
+	}
+	rows := BuildCloseList(evs, ctxs, "solo")
+	v := newCloseListView(rows, ctxs, map[string]bool{"solo": true}, now)
+	r := rowByEvent(t, rows, 1)
+
+	wide := ansi.Strip(v.renderRow(r, 76, false))
+	if !strings.Contains(wide, "wt/topic") || !strings.Contains(wide, name) {
+		t.Fatalf("at 76 both columns fit; got %q", wide)
+	}
+	// At 56 they do not both fit. The cwd column is the one that goes.
+	tight := ansi.Strip(v.renderRow(r, 56, false))
+	if strings.Contains(tight, "wt/topic") {
+		t.Errorf("cwd column should be dropped at 56, got %q", tight)
+	}
+	if !strings.Contains(tight, name) {
+		t.Errorf("name should survive intact at 56, got %q", tight)
 	}
 }
