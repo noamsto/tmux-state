@@ -266,9 +266,31 @@ func (s *Store) PruneSnapshots(ctx context.Context, keep int, nowMs int64) error
 	return nil
 }
 
-// PruneCloseEvents deletes non-snapshot events beyond the keep newest.
-func (s *Store) PruneCloseEvents(ctx context.Context, keep int) error {
-	_, err := s.db.ExecContext(ctx, `
+// PruneUnresolvableCloseEvents deletes non-snapshot events with no prior
+// snapshot to resolve against (ts <= MIN(snapshot ts)). When the store has
+// no snapshots, MIN is NULL and that comparison deletes nothing.
+func (s *Store) PruneUnresolvableCloseEvents(ctx context.Context) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `
+		DELETE FROM events
+		WHERE kind != 'snapshot'
+		  AND ts <= (SELECT MIN(ts) FROM events WHERE kind = 'snapshot')
+	`)
+	if err != nil {
+		return 0, fmt.Errorf("prune unresolvable close events: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("prune unresolvable close events: %w", err)
+	}
+	return n, nil
+}
+
+// PruneCloseEvents deletes non-snapshot events beyond the keep newest, and
+// also those with no prior snapshot to resolve against (ts <= MIN(snapshot
+// ts)). When the store has no snapshots, MIN is NULL and that comparison
+// deletes nothing.
+func (s *Store) PruneCloseEvents(ctx context.Context, keep int) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `
 		DELETE FROM events
 		WHERE kind != 'snapshot'
 		  AND id NOT IN (
@@ -279,9 +301,17 @@ func (s *Store) PruneCloseEvents(ctx context.Context, keep int) error {
 		  )
 	`, keep)
 	if err != nil {
-		return fmt.Errorf("prune close events: %w", err)
+		return 0, fmt.Errorf("prune close events: %w", err)
 	}
-	return nil
+	keepN, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("prune close events: %w", err)
+	}
+	minFloor, err := s.PruneUnresolvableCloseEvents(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return keepN + minFloor, nil
 }
 
 // UpsertScrollback inserts or updates a scrollback row by sha256, leaving
