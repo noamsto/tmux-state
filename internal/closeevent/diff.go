@@ -139,6 +139,19 @@ func findClosedSession(prior snapshot.Manifest, post CloseManifest) *ClosedItem 
 	for _, w := range post.Index.Windows {
 		live[w.Session] = true
 	}
+	// The event's own session name pins the entity when several sessions are
+	// absent from the index — a stale snapshot, or closes in a row — where the
+	// scan below would hand every one of them the same session.
+	if post.SessionName != "" && !live[post.SessionName] {
+		for i := range prior.Sessions {
+			s := &prior.Sessions[i]
+			if s.Name == post.SessionName {
+				return &ClosedItem{Session: s, SessionName: s.Name}
+			}
+		}
+	}
+	// Fallback for events recorded before the name was stored, and for names
+	// the prior snapshot never captured: first missing wins.
 	for i := range prior.Sessions {
 		s := &prior.Sessions[i]
 		if !live[s.Name] {
