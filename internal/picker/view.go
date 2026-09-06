@@ -693,12 +693,13 @@ func cwdTail(cwd, base string) string {
 // three cells wide at every scale. humanAge's "just now" is prose written for
 // the preview pane's sentences; eight cells of it here costs the name column
 // its width and truncates into a false value ("just …") on a narrow row.
+// Sub-minute ages render as the static "<1m" rather than counting seconds:
+// View() recomputes time.Now() on every render, so a seconds count ticks up
+// on every keystroke while the user navigates the list — motion a static
+// column should not have.
 func columnAge(d time.Duration) string {
 	if d < time.Minute {
-		if d < 0 {
-			d = 0
-		}
-		return fmt.Sprintf("%ds", int(d.Seconds()))
+		return "<1m"
 	}
 	return strings.TrimSuffix(humanAge(d), " ago")
 }

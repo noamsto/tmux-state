@@ -549,10 +549,14 @@ func TestCloseListRow_TieHasNoModalCwd(t *testing.T) {
 	}
 }
 
-// TestCloseListRow_SubMinuteAgeIsSeconds keeps the age column numeric.
-// humanAge says "just now", which is right in the preview pane's prose and
-// eight cells of prose in a column sized for "4m".
-func TestCloseListRow_SubMinuteAgeIsSeconds(t *testing.T) {
+// TestCloseListRow_SubMinuteAgeIsStatic keeps the age column both numeric and
+// still: humanAge says "just now", which is right in the preview pane's prose
+// and eight cells of prose in a column sized for "4m", but a seconds count
+// (e.g. "47s") ticks up on every render since View() recomputes time.Now() on
+// every keystroke — motion a static column should not have. "<1m" satisfies
+// both: three cells, and it never changes while the close stays under a
+// minute old.
+func TestCloseListRow_SubMinuteAgeIsStatic(t *testing.T) {
 	applyTheme(NewTheme())
 	now := time.Now()
 	evs := []store.Event{{ID: 1, Ts: now.Add(-47 * time.Second).UnixMilli()}}
@@ -560,8 +564,8 @@ func TestCloseListRow_SubMinuteAgeIsSeconds(t *testing.T) {
 	rows := BuildCloseList(evs, ctxs, "mono")
 	v := newCloseListView(rows, ctxs, map[string]bool{"mono": true}, now)
 	got := ansi.Strip(v.renderRow(rowByEvent(t, rows, 1), 76, false))
-	if !strings.HasSuffix(got, "47s") || strings.Contains(got, "just") {
-		t.Errorf("age column = %q, want it to end in %q", got, "47s")
+	if !strings.HasSuffix(got, "<1m") || strings.Contains(got, "just") {
+		t.Errorf("age column = %q, want it to end in %q", got, "<1m")
 	}
 }
 
