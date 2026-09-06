@@ -605,15 +605,17 @@ func newCloseListView(rows []CloseRow, ctxs map[int64]CloseContext, live map[str
 	}
 
 	modal := make(map[string]string, len(counts))
+	base := make(map[string]string, len(counts))
 	for session, byCwd := range counts {
 		modal[session] = modalCwd(byCwd)
+		base[session] = commonPathPrefix(byCwd)
 	}
 	for _, r := range rows {
 		cwd, ok := cwds[r.EventID]
 		if !ok || cwd == modal[r.Session] {
 			continue
 		}
-		tail := cwdTail(cwd, modal[r.Session])
+		tail := cwdTail(cwd, base[r.Session])
 		v.tails[r.EventID] = tail
 		if w := lipgloss.Width(tail); w > v.widest {
 			v.widest = w
@@ -643,23 +645,61 @@ func modalCwd(byCwd map[string]int) string {
 	return best
 }
 
-// cwdTail returns the part of cwd that modal does not already say: the path
+// commonPathPrefix returns the deepest directory every one of a session's
+// cwds sits under. It is the strip base rather than the modal cwd because the
+// two answer different questions: modal decides whether a row says anything
+// at all, while the base decides how much of what it says is already implied
+// by its neighbours. Keying the strip on modal would print full absolute
+// paths whenever the session has no modal cwd — the common two-close case.
+func commonPathPrefix(byCwd map[string]int) string {
+	var base []string
+	first := true
+	for cwd := range byCwd {
+		segs := strings.Split(cwd, "/")
+		if first {
+			base, first = segs, false
+			continue
+		}
+		i := 0
+		for i < len(base) && i < len(segs) && base[i] == segs[i] {
+			i++
+		}
+		base = base[:i]
+	}
+	return strings.Join(base, "/")
+}
+
+// cwdTail returns the part of cwd that base does not already say: the path
 // segments after the two share a prefix. Falls back to the whole path when
-// there is no modal cwd, or when cwd is an ancestor of it and so has no tail
-// of its own.
-func cwdTail(cwd, modal string) string {
-	if modal == "" {
+// the paths share no prefix, and to the last segment when cwd is base itself
+// and so has no tail of its own.
+func cwdTail(cwd, base string) string {
+	if base == "" {
 		return cwd
 	}
-	have, want := strings.Split(cwd, "/"), strings.Split(modal, "/")
+	have, want := strings.Split(cwd, "/"), strings.Split(base, "/")
 	i := 0
 	for i < len(have) && i < len(want) && have[i] == want[i] {
 		i++
 	}
 	if i >= len(have) {
-		return cwd
+		return have[len(have)-1]
 	}
 	return strings.Join(have[i:], "/")
+}
+
+// columnAge renders an age for the right-aligned age column, which is two or
+// three cells wide at every scale. humanAge's "just now" is prose written for
+// the preview pane's sentences; eight cells of it here costs the name column
+// its width and truncates into a false value ("just …") on a narrow row.
+func columnAge(d time.Duration) string {
+	if d < time.Minute {
+		if d < 0 {
+			d = 0
+		}
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	return strings.TrimSuffix(humanAge(d), " ago")
 }
 
 // closeKindWidth pads the kind column so every row's cwd starts in the same
@@ -704,7 +744,7 @@ func (v closeListView) renderRow(r CloseRow, innerWidth int, active bool) string
 	if r.Count > 1 {
 		right = append(right, fmt.Sprintf("×%d", r.Count))
 	}
-	right = append(right, strings.TrimSuffix(humanAge(v.now.Sub(time.UnixMilli(r.Ts))), " ago"))
+	right = append(right, columnAge(v.now.Sub(time.UnixMilli(r.Ts))))
 	tail := strings.Join(right, " ")
 
 	line := v.layoutRow(r, name, extra, target, tail, innerWidth)

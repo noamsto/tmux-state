@@ -1,6 +1,7 @@
 package picker
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -685,27 +686,125 @@ func TestCloseListRow_ModalCwdIsNotTheSessionName(t *testing.T) {
 
 // TestCloseListRow_TieHasNoModalCwd: two closes, two cwds, no majority. Neither
 // is the boring background, so both rows show their path rather than one being
-// arbitrarily declared normal.
+// arbitrarily declared normal — but they show the segments that differ, not two
+// near-identical absolute paths. This is the most common list shape (one close
+// in a repo, one in a worktree of it), so it is where a cwd column that repeats
+// itself would hurt most.
 func TestCloseListRow_TieHasNoModalCwd(t *testing.T) {
 	applyTheme(NewTheme())
 	now := time.Now()
 	evs := []store.Event{{ID: 1, Ts: now.UnixMilli()}, {ID: 2, Ts: now.UnixMilli() - 1000}}
 	ctxs := map[int64]CloseContext{
-		1: paneCloseCtx("duo", 1, "a", "nvim", "/srv/alpha"),
-		2: paneCloseCtx("duo", 2, "b", "nvim", "/srv/beta"),
+		1: paneCloseCtx("duo", 1, "main", "claude", "/home/noams/git/tmux-remux"),
+		2: paneCloseCtx("duo", 2, "feat", "claude", "/home/noams/git/wt/feat-104"),
 	}
 	rows := BuildCloseList(evs, ctxs, "duo")
 	v := newCloseListView(rows, ctxs, map[string]bool{"duo": true}, now)
-	for _, want := range []string{"/srv/alpha", "/srv/beta"} {
-		found := false
-		for _, r := range rows {
-			if r.Selectable() && strings.Contains(ansi.Strip(v.renderRow(r, 76, false)), want) {
-				found = true
+	want := map[int64]string{
+		1: "● pane    tmux-remux  main claude → duo:1",
+		2: "● pane    wt/feat-104 feat claude → duo:2",
+	}
+	for id, prefix := range want {
+		got := ansi.Strip(v.renderRow(rowByEvent(t, rows, id), 76, false))
+		if !strings.HasPrefix(got, prefix) {
+			t.Errorf("row %d = %q, want prefix %q", id, got, prefix)
+		}
+		if strings.Contains(got, "/home/noams") {
+			t.Errorf("row %d spends the column on the shared prefix: %q", id, got)
+		}
+	}
+}
+
+// TestCloseListRow_SubMinuteAgeIsSeconds keeps the age column numeric.
+// humanAge says "just now", which is right in the preview pane's prose and
+// eight cells of prose in a column sized for "4m".
+func TestCloseListRow_SubMinuteAgeIsSeconds(t *testing.T) {
+	applyTheme(NewTheme())
+	now := time.Now()
+	evs := []store.Event{{ID: 1, Ts: now.Add(-47 * time.Second).UnixMilli()}}
+	ctxs := map[int64]CloseContext{1: paneCloseCtx("mono", 1, "edit", "nvim", "/home/noams")}
+	rows := BuildCloseList(evs, ctxs, "mono")
+	v := newCloseListView(rows, ctxs, map[string]bool{"mono": true}, now)
+	got := ansi.Strip(v.renderRow(rowByEvent(t, rows, 1), 76, false))
+	if !strings.HasSuffix(got, "47s") || strings.Contains(got, "just") {
+		t.Errorf("age column = %q, want it to end in %q", got, "47s")
+	}
+}
+
+// TestCloseListRow_WidthLadder walks one row down the widths a real pane
+// passes through, pinning what survives at each step: the cwd column is
+// truncated from the left (the tail is what discriminates), then dropped
+// whole, then the extra column goes, and the name is clipped only after that
+// — never below the eight cells that still identify a window.
+func TestCloseListRow_WidthLadder(t *testing.T) {
+	applyTheme(NewTheme())
+	now := time.Now()
+	evs := []store.Event{
+		{ID: 1, Ts: now.Add(-4 * time.Minute).UnixMilli()},
+		{ID: 2, Ts: now.Add(-5 * time.Minute).UnixMilli()},
+		{ID: 3, Ts: now.Add(-6 * time.Minute).UnixMilli()},
+	}
+	ctxs := map[int64]CloseContext{
+		1: paneCloseCtx("solo", 1, "release-notes-editor", "claude", "/srv/app/wt/topic-branch-long"),
+		2: paneCloseCtx("solo", 2, "sh", "claude", "/srv/app/main"),
+		3: paneCloseCtx("solo", 3, "sh", "claude", "/srv/app/main"),
+	}
+	rows := BuildCloseList(evs, ctxs, "solo")
+	v := newCloseListView(rows, ctxs, map[string]bool{"solo": true}, now)
+	r := rowByEvent(t, rows, 1)
+
+	tests := []struct {
+		width int
+		want  string
+	}{
+		// 20-cell tail, quarter-row budget 30 capped at 24: the tail fits whole.
+		{120, "● pane    wt/topic-branch-long release-notes-editor claude → solo:1"},
+		// Quarter-row budget 19: one cell short, so the head goes, not the tail.
+		{76, "● pane    …/topic-branch-long release-notes-editor claude → solo:1"},
+		// The column no longer fits beside the name, and yields whole.
+		{60, "● pane    release-notes-editor claude → solo:1"},
+		{46, "● pane    release-notes-ed… claude → solo:1"},
+		// The extra column goes before the name is cut past its floor.
+		{34, "● pane    release… → solo:1"},
+	}
+	for _, tt := range tests {
+		t.Run(strconv.Itoa(tt.width), func(t *testing.T) {
+			got := strings.TrimRight(ansi.Strip(v.renderRow(r, tt.width, false)), " ")
+			if !strings.HasPrefix(got, tt.want) {
+				t.Errorf("w=%d:\n got %q\nwant prefix %q", tt.width, got, tt.want)
 			}
-		}
-		if !found {
-			t.Errorf("tied cwd %q should be shown on its row", want)
-		}
+		})
+	}
+}
+
+// TestCloseListRow_CwdColumnNeedsRoomToMeanAnything: below eight cells a path
+// fragment says nothing a reader can act on, so the column is dropped rather
+// than shown as an ellipsis and a syllable.
+func TestCloseListRow_CwdColumnNeedsRoomToMeanAnything(t *testing.T) {
+	applyTheme(NewTheme())
+	now := time.Now()
+	evs := []store.Event{
+		{ID: 1, Ts: now.Add(-4 * time.Minute).UnixMilli()},
+		{ID: 2, Ts: now.Add(-5 * time.Minute).UnixMilli()},
+		{ID: 3, Ts: now.Add(-6 * time.Minute).UnixMilli()},
+	}
+	ctxs := map[int64]CloseContext{
+		1: paneCloseCtx("s", 1, "a", "fish", "/srv/app/wt/topic"),
+		2: paneCloseCtx("s", 2, "b", "fish", "/srv/app/main"),
+		3: paneCloseCtx("s", 3, "c", "fish", "/srv/app/main"),
+	}
+	rows := BuildCloseList(evs, ctxs, "s")
+	v := newCloseListView(rows, ctxs, map[string]bool{"s": true}, now)
+	r := rowByEvent(t, rows, 1)
+
+	// A quarter of 32 is exactly the floor, and the whole 8-cell tail fits.
+	if got := ansi.Strip(v.renderRow(r, 32, false)); !strings.HasPrefix(got, "● pane    wt/topic a → s:1") {
+		t.Errorf("at 32 the column should hold the tail, got %q", got)
+	}
+	// A quarter of 30 is under it. The row has room to spare, so this is the
+	// floor talking, not the layout running out of width.
+	if got := ansi.Strip(v.renderRow(r, 30, false)); !strings.HasPrefix(got, "● pane    a → s:1") {
+		t.Errorf("at 30 the column should be dropped, got %q", got)
 	}
 }
 
@@ -779,7 +878,7 @@ func TestCloseListRow_ElidesDefaults(t *testing.T) {
 	v := newCloseListView(rows, ctxs, map[string]bool{"mono": true}, now)
 
 	defaults := ansi.Strip(v.renderRow(rowByEvent(t, rows, 1), 76, false))
-	for _, unwanted := range []string{"fish", "1p", "(live)"} {
+	for _, unwanted := range []string{"fish", "1p", "(gone)"} {
 		if strings.Contains(defaults, unwanted) {
 			t.Errorf("default %q should be elided, got %q", unwanted, defaults)
 		}
