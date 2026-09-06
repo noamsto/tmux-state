@@ -42,6 +42,7 @@ func TestRenderList_NeverOverflowsFrame(t *testing.T) {
 			if got := lipgloss.Width(out); got != w {
 				t.Errorf("renderList(w=%d,h=%d): width=%d, want %d", w, h, got, w)
 			}
+			assertFrameCloses(t, out)
 		}
 	}
 }
@@ -241,6 +242,20 @@ func TestRenderCloseTree_NeverOverflowsFrame(t *testing.T) {
 		if got := lipgloss.Height(out); got != size.h {
 			t.Errorf("width %d height %d: rendered height %d, want %d", size.w, size.h, got, size.h)
 		}
+		assertFrameCloses(t, out)
+	}
+}
+
+// assertFrameCloses checks that a single frame's last row is its bottom
+// border. Height alone cannot: lipgloss v2's MaxHeight truncates the line
+// list, so an over-tall body drops the closing border and still measures the
+// height that was asked for.
+func assertFrameCloses(t *testing.T, frame string) {
+	t.Helper()
+	rows := strings.Split(frame, "\n")
+	last := rows[len(rows)-1]
+	if !strings.Contains(last, "╰") || !strings.Contains(last, "╯") {
+		t.Errorf("frame's last row carries no bottom corners:\n%s", frame)
 	}
 }
 
@@ -951,5 +966,264 @@ func TestClosedPaneInfo_NoPaneIDReportsTheDiedPane(t *testing.T) {
 	cmd, cwd := closedPaneInfo(cc)
 	if cmd != "fish" || cwd != "/y" {
 		t.Errorf("got %q %q, want fish /y (the pane that died)", cmd, cwd)
+	}
+}
+
+// closeListModel builds a close-mode model driven by the flat row list, with
+// `n` closes in a second session so the list outruns any frame height the
+// tests use.
+func closeListModel(t *testing.T, n int) PickerModel {
+	t.Helper()
+	applyTheme(NewTheme())
+	now := time.Now()
+	evs := []store.Event{{ID: 1, Ts: now.Add(-4 * time.Minute).UnixMilli()}}
+	ctxs := map[int64]CloseContext{1: paneCloseCtx("mono", 2, "main", "claude", "/home/noams/git/tmux-remux")}
+	for i := 2; i <= n+1; i++ {
+		evs = append(evs, store.Event{ID: int64(i), Ts: now.Add(-time.Duration(i) * time.Hour).UnixMilli()})
+		ctxs[int64(i)] = paneCloseCtx("nix-config", i, "window-"+strconv.Itoa(i), "fish", "/home/noams/nix-config")
+	}
+	m := NewPickerModel(ModeClose, evs, map[string]bool{"mono": true}, nil)
+	m.SetCloseContexts(ctxs)
+	m.SetCloseRows(BuildCloseList(evs, ctxs, "mono"))
+	m.Bootstrap()
+	return m
+}
+
+// The flat list and its preview split the width so that the preview — the
+// column carrying the scrollback that tells two similar closes apart — is
+// never the one that gives way: the list stops growing at a width that fits
+// its columns and every cell past that goes to the preview. Below 110 there
+// is no preview column at all; it stacks underneath instead. Widths are
+// spelled out rather than read off the constants, which would make the
+// assertion agree with whatever the code says.
+func TestPaneWidths_CloseListSplit(t *testing.T) {
+	m := closeListModel(t, 4)
+	// wantList of 0 means "stacked": one full-width column, no preview beside it.
+	for _, tc := range []struct{ w, wantList int }{
+		{80, 0}, {100, 0}, {109, 0}, {110, 50}, {130, 52}, {160, 64}, {200, 64},
+	} {
+		m.width, m.height = tc.w, 40
+		list, tree, preview := m.paneWidthsThree()
+		if tree != 0 {
+			t.Errorf("width=%d: middle column = %d, want 0", tc.w, tree)
+		}
+		if list+tree+preview != tc.w {
+			t.Errorf("width=%d: columns sum to %d", tc.w, list+tree+preview)
+		}
+		if tc.wantList == 0 {
+			if preview != 0 || list != tc.w {
+				t.Errorf("width=%d: got list=%d preview=%d, want the whole width stacked", tc.w, list, preview)
+			}
+			if !m.stacksPanel() {
+				t.Errorf("width=%d: preview neither beside the list nor stacked under it", tc.w)
+			}
+			continue
+		}
+		if m.stacksPanel() {
+			t.Errorf("width=%d: stacked despite room for two columns", tc.w)
+		}
+		if list != tc.wantList {
+			t.Errorf("width=%d: list = %d, want %d", tc.w, list, tc.wantList)
+		}
+		if preview < list {
+			t.Errorf("width=%d: preview = %d, narrower than the list (%d)", tc.w, preview, list)
+		}
+	}
+	// Past the list's ceiling the extra cells are the preview's: at 200 it is
+	// more than twice the list, where a proportional split would not be.
+	m.width = 200
+	list, _, preview := m.paneWidthsThree()
+	if preview < 2*list {
+		t.Errorf("at 200 columns: preview = %d, list = %d — growth is not going to the preview", preview, list)
+	}
+}
+
+// The narrowest side-by-side width is where the list is tightest, so it is
+// what sets the list's floor. A row there must still carry every column that
+// changes what Enter does: the name, the reopen target, and the "(gone)" tag
+// that says the target session has to be recreated rather than reopened.
+// layoutRow sheds columns in order as a row runs out of room, so a floor set
+// a few cells lower silently drops that tag and the row reads as a live
+// session. Widths narrower than this were rendered and looked at: 44 loses
+// "(gone)", 36 loses the name, 30 loses the target too.
+func TestRenderCloseList_KeepsEveryDecidingColumnAtTheNarrowestSplit(t *testing.T) {
+	m := closeListModel(t, 4)
+	m.width, m.height = 110, 40
+	listW, _, _ := m.paneWidthsThree()
+	lines := innerLines(t, renderCloseList(m, listW, 38))
+	for _, want := range []string{"main claude → mono:2", "window-2 (gone) → nix-config:2"} {
+		found := false
+		for _, l := range lines {
+			if strings.Contains(l, want) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("no row reads %q in a %d-cell list:\n%s", want, listW, strings.Join(lines, "\n"))
+		}
+	}
+}
+
+// TestView_CloseListFrameGeometry pins the flat list's frames across a size
+// matrix. lipgloss v2's MaxHeight hard-truncates the rendered line list, so an
+// over-tall body silently loses its closing border rather than overflowing:
+// an exact height alone cannot see that, and the bottom corners can.
+func TestView_CloseListFrameGeometry(t *testing.T) {
+	for _, w := range []int{40, 60, 80, 100, 109, 110, 130, 160, 200} {
+		for _, h := range []int{10, 24, 30, 40} {
+			m := closeListModel(t, 40)
+			m.width, m.height = w, h
+			m.SetHiddenCount(3)
+
+			out := m.View().Content
+			if got := lipgloss.Height(out); got != h {
+				t.Errorf("w=%d h=%d: rendered height=%d, want %d\n%s", w, h, got, h, out)
+			}
+			if got := lipgloss.Width(out); got != w {
+				t.Errorf("w=%d h=%d: rendered width=%d, want %d", w, h, got, w)
+			}
+
+			// One frame per row when the preview stacks (or is dropped), two
+			// when it sits beside the list.
+			want := 1
+			if w >= closeSideBySideMin {
+				want = 2
+			}
+			rows := strings.Split(out, "\n")
+			if got := strings.Count(rows[0], "╭"); got != want {
+				t.Errorf("w=%d h=%d: row 0 opens %d frames, want %d\n%s", w, h, got, want, out)
+			}
+			last := len(rows) - 1 - lipgloss.Height(m.renderFooter(w))
+			if got := strings.Count(rows[last], "╰"); got != want {
+				t.Errorf("w=%d h=%d: last body row closes %d frames (╰), want %d\n%s", w, h, got, want, out)
+			}
+			if got := strings.Count(rows[last], "╯"); got != want {
+				t.Errorf("w=%d h=%d: last body row closes %d frames (╯), want %d\n%s", w, h, got, want, out)
+			}
+		}
+	}
+}
+
+// Past a frame's worth of rows a section header scrolls out of view and
+// nothing says whose closes are on screen. The active section's header is
+// pinned to the first row instead — and only then, so a cursor near the top
+// never sees its header twice.
+func TestRenderCloseList_PinsTheActiveSectionHeader(t *testing.T) {
+	m := closeListModel(t, 40)
+	m.width, m.height = 60, 20
+	header := sectionOther
+
+	m.SetCursor(30)
+	lines := innerLines(t, renderCloseList(m, 60, 18))
+	if !strings.HasPrefix(lines[0], header) {
+		t.Errorf("cursor deep in %q: first row = %q, want the section header pinned\n%s", header, lines[0], strings.Join(lines, "\n"))
+	}
+	if n := countPrefixed(lines, header); n != 1 {
+		t.Errorf("section header appears %d times, want exactly the pinned one:\n%s", n, strings.Join(lines, "\n"))
+	}
+	// The pinned row is a header the window itself no longer holds — not the
+	// list's own header row shown in place.
+	if strings.HasPrefix(lines[1], header) {
+		t.Errorf("pinned header duplicates the row below it:\n%s", strings.Join(lines, "\n"))
+	}
+
+	m.SetCursor(1)
+	lines = innerLines(t, renderCloseList(m, 60, 18))
+	if strings.HasPrefix(lines[0], header) {
+		t.Errorf("cursor at the top pinned %q over its own section:\n%s", header, strings.Join(lines, "\n"))
+	}
+	if n := countPrefixed(lines, sectionThis("mono")); n != 1 {
+		t.Errorf("this-session header appears %d times, want 1:\n%s", n, strings.Join(lines, "\n"))
+	}
+}
+
+// innerLines returns a frame's content rows, stripped of border, padding and
+// styling, so a test can assert on the text a row carries.
+func innerLines(t *testing.T, frame string) []string {
+	t.Helper()
+	rows := strings.Split(ansi.Strip(frame), "\n")
+	if len(rows) < 3 {
+		t.Fatalf("frame has %d rows, too few to have content:\n%s", len(rows), frame)
+	}
+	out := make([]string, 0, len(rows)-2)
+	for _, r := range rows[1 : len(rows)-1] {
+		out = append(out, strings.TrimSpace(strings.Trim(r, "│")))
+	}
+	return out
+}
+
+// countPrefixed counts the lines starting with prefix.
+func countPrefixed(lines []string, prefix string) int {
+	n := 0
+	for _, l := range lines {
+		if strings.HasPrefix(l, prefix) {
+			n++
+		}
+	}
+	return n
+}
+
+// The hidden-count line survives the move to the flat list.
+func TestRenderCloseList_KeepsTheHiddenCountFooter(t *testing.T) {
+	m := closeListModel(t, 40)
+	m.SetHiddenCount(3)
+	lines := innerLines(t, renderCloseList(m, 60, 18))
+	if got := lines[len(lines)-1]; got != "— 3 unrecoverable closes hidden —" {
+		t.Errorf("last row = %q, want the hidden-count footer", got)
+	}
+}
+
+// The flat list has nothing to expand, so its footer must not advertise the
+// expand key — while the close tree, still wired into main.go, must keep it.
+func TestRenderFooter_ExpandHintIsCloseTreeOnly(t *testing.T) {
+	applyTheme(NewTheme())
+	h := defaultKeys().Right.Help()
+
+	flat := closeListModel(t, 4)
+	flat.width, flat.height = 160, 40
+	foot := stripANSI(flat.renderFooter(flat.width))
+	if strings.Contains(foot, h.Key+":") || strings.Contains(foot, h.Desc) {
+		t.Errorf("flat close footer advertises %q (%s):\n%s", h.Key, h.Desc, foot)
+	}
+
+	tree := PickerModel{mode: ModeClose, closeTree: closeTreeFixture(), keys: defaultKeys(), width: 160, height: 40}
+	foot = stripANSI(tree.renderFooter(tree.width))
+	if !strings.Contains(foot, h.Key+":") {
+		t.Errorf("close tree footer dropped the expand hint (%q):\n%s", h.Key, foot)
+	}
+}
+
+// A stacked preview is still a preview: the scroll hint must survive the
+// widths where the flat list has no preview column beside it.
+func TestRenderFooter_StackedCloseListKeepsTheScrollHint(t *testing.T) {
+	applyTheme(NewTheme())
+	scrollKey := defaultKeys().PreviewUp.Help().Key
+	m := closeListModel(t, 4)
+	m.width, m.height = 100, 40
+	foot := stripANSI(m.renderFooter(m.width))
+	if !strings.Contains(foot, scrollKey+":") {
+		t.Errorf("stacked close footer dropped the preview-scroll hint (%q):\n%s", scrollKey, foot)
+	}
+}
+
+// The list frame's own box math, independent of View's composition: exact
+// size and an intact bottom border at every pane size, with the hidden-count
+// footer competing for the last row.
+func TestRenderCloseList_NeverOverflowsFrame(t *testing.T) {
+	m := closeListModel(t, 40)
+	m.SetHiddenCount(14)
+	for _, size := range []struct{ w, h int }{{28, 5}, {32, 8}, {50, 6}, {64, 12}, {80, 30}} {
+		m.width, m.height = size.w, size.h
+		for _, cursor := range []int{1, 25} {
+			m.SetCursor(cursor)
+			out := renderCloseList(m, size.w, size.h)
+			if got := lipgloss.Width(out); got != size.w {
+				t.Errorf("w=%d h=%d cursor=%d: width %d, want %d", size.w, size.h, cursor, got, size.w)
+			}
+			if got := lipgloss.Height(out); got != size.h {
+				t.Errorf("w=%d h=%d cursor=%d: height %d, want %d", size.w, size.h, cursor, got, size.h)
+			}
+			assertFrameCloses(t, out)
+		}
 	}
 }

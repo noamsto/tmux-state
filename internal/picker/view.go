@@ -40,6 +40,22 @@ func (m PickerModel) View() tea.View {
 	bodyHeight := m.bodyHeight()
 	var content string
 	switch {
+	case m.usesCloseRows() && previewWidth == 0 && !m.stacksPanel():
+		// Too narrow for a preview at all — the list gets the whole width.
+		content = lipgloss.JoinVertical(lipgloss.Left, renderCloseList(m, m.width, bodyHeight), footer)
+	case m.usesCloseRows() && previewWidth == 0:
+		// Below closeSideBySideMin the preview goes under the list, full
+		// width: a column narrow enough to fit beside the list truncates the
+		// scrollback that is the whole reason to show it.
+		topHeight := bodyHeight - m.panelFrameHeight()
+		list := renderCloseList(m, m.width, topHeight)
+		panel := m.renderPreview(m.width)
+		content = lipgloss.JoinVertical(lipgloss.Left, list, panel, footer)
+	case m.usesCloseRows():
+		list := renderCloseList(m, listWidth, bodyHeight)
+		preview := m.renderPreview(previewWidth)
+		body := lipgloss.JoinHorizontal(lipgloss.Top, list, preview)
+		content = lipgloss.JoinVertical(lipgloss.Left, body, footer)
 	case m.mode == ModeClose && m.closeTree != nil && m.width < 80:
 		content = lipgloss.JoinVertical(lipgloss.Left, renderCloseTree(m, m.width, bodyHeight), footer)
 	case m.mode == ModeClose && m.closeTree != nil:
@@ -110,17 +126,19 @@ func (m PickerModel) renderFooter(width int) string {
 		counter,
 		hint(m.keys.Enter),
 	}
-	if m.mode == ModeClose {
+	if m.mode == ModeClose && !m.usesCloseRows() {
 		// The close tree has no other affordance advertising that a
 		// collapsed header can be opened — without this hint prefix+U can
 		// open on a single "▸ other sessions" row with no clue how to see
-		// inside it.
+		// inside it. The flat list has nothing to expand, so it says nothing.
 		parts = append(parts, hint(m.keys.Right))
 	}
 	// Tab reaches snapshot mode's sub-manifest tree; close mode has no second
-	// tree, and its preview scrolls with Alt+j/k regardless of focus.
+	// tree, and its preview scrolls with Alt+j/k regardless of focus. A
+	// stacked preview is still a preview, so the flat list advertises the
+	// scroll at widths where paneWidthsThree reports no preview column.
 	_, _, previewW := m.paneWidthsThree()
-	if previewW > 0 {
+	if previewW > 0 || (m.usesCloseRows() && m.stacksPanel()) {
 		if m.mode == ModeSnapshot {
 			parts = append(parts, hint(m.keys.Tab))
 		}
@@ -153,15 +171,30 @@ func (m PickerModel) bodyHeight() int {
 	return h
 }
 
-// stacksPanel reports whether the map/scrollback panel goes under the tree
-// rather than beside it — the case for a terminal too narrow for a third
-// column. The popup is 90% of the client, so that threshold lands near 120
-// columns. Close mode only ever has two columns, so it never stacks.
+// closeSideBySideMin is the narrowest terminal that puts the flat close list
+// and its preview side by side. Below it there are not enough cells for both
+// a list that still names its reopen target and a preview wide enough to read
+// a wrapped line of scrollback, so the preview goes underneath at full width
+// instead — where even an 80-column terminal can read it.
+const closeSideBySideMin = 110
+
+// stacksPanel reports whether the map/scrollback panel goes under the list
+// rather than beside it — the case for a terminal too narrow for both. The
+// popup is 90% of the client, so snapshot mode's threshold lands near 120
+// columns; the flat close list needs one column less furniture and holds out
+// to closeSideBySideMin. The close tree only ever had two columns and never
+// stacked.
 func (m PickerModel) stacksPanel() bool {
+	if m.width < 80 {
+		return false
+	}
+	if m.usesCloseRows() {
+		return m.width < closeSideBySideMin
+	}
 	if m.mode == ModeClose {
 		return false
 	}
-	return m.width >= 80 && m.width < 120
+	return m.width < 120
 }
 
 // panelFrameHeight is the frame height of the map/scrollback panel: the whole
@@ -180,6 +213,14 @@ func (m PickerModel) panelFrameHeight() int {
 func (m PickerModel) paneWidthsThree() (int, int, int) {
 	if m.width < 80 {
 		return m.width, 0, 0
+	}
+	if m.usesCloseRows() {
+		if m.width < closeSideBySideMin {
+			// Stacked: both halves span the terminal.
+			return m.width, 0, 0
+		}
+		listW := closeListWidth(m.width)
+		return listW, 0, m.width - listW
 	}
 	if m.mode == ModeClose {
 		// 40% keeps the tree past its 32-cell floor for deep guide prefixes
@@ -205,6 +246,34 @@ func (m PickerModel) paneWidthsThree() (int, int, int) {
 	treeW := m.width / 3
 	return listW, treeW, m.width - listW - treeW
 }
+
+// closeListWidth splits a side-by-side close layout between the list and the
+// preview. The list's appetite is bounded — its columns are a marker, a kind,
+// a path tail, a name and a reopen target, and past closeListMax the extra
+// cells only pad the gap before the age — while the preview's is not: it
+// shows wrapped scrollback, which is what tells two otherwise identical
+// closes apart. So the list takes a fixed share up to that ceiling and every
+// cell beyond it goes to the preview.
+func closeListWidth(width int) int {
+	w := width * 2 / 5
+	if w < closeListMin {
+		w = closeListMin
+	}
+	if w > closeListMax {
+		w = closeListMax
+	}
+	return w
+}
+
+// Bounds on the close list's column, both read off rendered output. The floor
+// is where layoutRow stops shedding columns: at 44 a row loses the "(gone)"
+// tag that says its session must be recreated, at 36 the window name, at 30
+// the reopen target. The ceiling is where the widest row in a realistic list
+// stops growing and the extra cells only pad the gap before the age.
+const (
+	closeListMin = 50
+	closeListMax = 64
+)
 
 func renderList(m PickerModel, width, height int) string {
 	frame := listFrame.Width(width).Height(height).MaxHeight(height)
@@ -263,6 +332,84 @@ func renderList(m PickerModel, width, height int) string {
 		b.WriteString(rowDim.Width(innerWidth).Align(lipgloss.Center).Render(text))
 	}
 	return frame.Render(b.String())
+}
+
+// renderCloseList renders the flat close list into the list pane: one physical
+// row per CloseRow, the hidden-count footer pinned to the bottom, and — once
+// the cursor's own section header has scrolled off the top — that header
+// pinned to the first row, so a long list never leaves the reader guessing
+// whose closes they are looking at.
+func renderCloseList(m PickerModel, width, height int) string {
+	frame := listFrame.Width(width).Height(height).MaxHeight(height)
+	innerWidth := width - listFrame.GetHorizontalFrameSize()
+	if innerWidth < 1 {
+		innerWidth = 1
+	}
+	if len(m.closeRows) == 0 {
+		msg := "No close events yet."
+		if m.hiddenCount > 0 {
+			msg = fmt.Sprintf("No recoverable closes (%d hidden).", m.hiddenCount)
+		}
+		return frame.Render(rowDim.Render(msg))
+	}
+
+	rows := height - 2
+	if rows < 1 {
+		rows = 1
+	}
+	showFooter := m.hiddenCount > 0 && rows > 1
+	rowBudget := rows
+	if showFooter {
+		rowBudget--
+	}
+
+	start, end := scrollWindow(m.cursor, len(m.closeRows), rowBudget)
+	// Shrinking the window can only push start further down, so the pinned
+	// header cannot come back into view and this settles in one pass.
+	pin := sectionHeaderIdx(m.closeRows, m.cursor)
+	if pin >= start || rowBudget < 2 {
+		pin = -1
+	} else {
+		rowBudget--
+		start, end = scrollWindow(m.cursor, len(m.closeRows), rowBudget)
+	}
+
+	v := newCloseListView(m.closeRows, m.closeContexts, m.runningSet, time.Now())
+	var b strings.Builder
+	if pin >= 0 {
+		b.WriteString(v.renderRow(m.closeRows[pin], innerWidth, false))
+		b.WriteString("\n")
+	}
+	for i := start; i < end; i++ {
+		b.WriteString(v.renderRow(m.closeRows[i], innerWidth, i == m.cursor))
+		if i < end-1 {
+			b.WriteString("\n")
+		}
+	}
+	if showFooter {
+		// Pin the footer to the bottom, blank-padding the gap above it.
+		for pad := end - start; pad < rowBudget; pad++ {
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
+		text := ansi.Truncate(fmt.Sprintf("— %s hidden —", hiddenPhrase(m.hiddenCount)), innerWidth, "…")
+		b.WriteString(rowDim.Width(innerWidth).Align(lipgloss.Center).Render(text))
+	}
+	return frame.Render(b.String())
+}
+
+// sectionHeaderIdx returns the index of the section header governing rows[i],
+// or -1 when nothing above it is one.
+func sectionHeaderIdx(rows []CloseRow, i int) int {
+	if i >= len(rows) {
+		i = len(rows) - 1
+	}
+	for ; i >= 0; i-- {
+		if rows[i].Kind == RowSectionHeader {
+			return i
+		}
+	}
+	return -1
 }
 
 // renderCloseTree renders the grouped close hierarchy into the list pane.

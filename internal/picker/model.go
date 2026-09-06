@@ -697,6 +697,20 @@ func (m *PickerModel) SetCursor(i int) { m.cursor = i }
 // CloseVisible returns the currently visible close-tree rows.
 func (m PickerModel) CloseVisible() []*CloseNode { return FlattenClose(m.closeTree) }
 
+// usesCloseRows reports whether close mode is driven by the flat row list
+// rather than the tree — the same precedence Update and CurrentEventID apply,
+// so every layer agrees on which model is live while main.go still sets the
+// tree. Collapses to `m.mode == ModeClose` once the tree goes.
+func (m PickerModel) usesCloseRows() bool {
+	return m.mode == ModeClose && len(m.closeRows) > 0
+}
+
+// hasCloseUI reports whether close mode has either model populated, and so
+// draws the close preview rather than snapshot mode's.
+func (m PickerModel) hasCloseUI() bool {
+	return m.mode == ModeClose && (len(m.closeRows) > 0 || m.closeTree != nil)
+}
+
 // CurrentEventID returns the event id under the cursor, or 0 when the cursor is
 // on a grouping header or there is nothing to point at.
 func (m PickerModel) CurrentEventID() int64 {

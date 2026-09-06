@@ -58,7 +58,7 @@ type scrollbackLoadedMsg struct {
 // renderPreview renders the right-most preview pane. width is the cell budget
 // (including the rounded border). Height comes from m.height.
 func (m PickerModel) renderPreview(width int) string {
-	if m.mode == ModeClose && m.closeTree != nil {
+	if m.hasCloseUI() {
 		return m.renderClosePreview(width)
 	}
 	frameHeight := m.panelFrameHeight()
@@ -141,24 +141,36 @@ func (m PickerModel) renderClosePreview(width int) string {
 	}
 	frame := previewFrame.Width(width).Height(frameHeight).MaxHeight(frameHeight)
 
-	vis := m.CloseVisible()
-	if m.cursor < 0 || m.cursor >= len(vis) {
-		return frame.Render(rowDim.Render("(nothing selected)"))
+	var cc CloseContext
+	var ts int64
+	if m.usesCloseRows() {
+		if m.cursor < 0 || m.cursor >= len(m.closeRows) {
+			return frame.Render(rowDim.Render("(nothing selected)"))
+		}
+		r := m.closeRows[m.cursor]
+		if !r.Selectable() {
+			return frame.Render(rowDim.Render("(a section — ↑↓ to reach a close)"))
+		}
+		cc, ts = m.CloseContextFor(r.EventID), r.Ts
+	} else {
+		vis := m.CloseVisible()
+		if m.cursor < 0 || m.cursor >= len(vis) {
+			return frame.Render(rowDim.Render("(nothing selected)"))
+		}
+		n := vis[m.cursor]
+		if n.EventID == 0 {
+			return frame.Render(rowDim.Render("(a section — ↑↓ to reach a close)"))
+		}
+		cc, ts = m.CloseContextFor(n.EventID), n.Ts
 	}
-	n := vis[m.cursor]
-	if n.EventID == 0 {
-		return frame.Render(rowDim.Render("(a section — ↑↓ to reach a close)"))
-	}
-	cc := m.CloseContextFor(n.EventID)
 
 	// A lipgloss frame pads short content but does not clip overflow — once the
 	// body has more lines than fit, MaxHeight hard-truncates the line list,
 	// dropping the closing border row rather than the excess. Hence the body
-	// only ever gets what the header leaves. The header clip below is a bound,
-	// not a live path: the header is two lines and close mode never stacks, so
-	// innerHeight is at least three. It stays because a smaller floor would
-	// make it fire, and silently losing the border is the failure it prevents.
-	lines := closePreviewHeader(cc, innerWidth, time.Now(), n.Ts)
+	// only ever gets what the header leaves, and the header itself is clipped:
+	// the flat list stacks the panel under it below closeSideBySideMin, where
+	// a short terminal can leave fewer than the header's two rows.
+	lines := closePreviewHeader(cc, innerWidth, time.Now(), ts)
 	if len(lines) > innerHeight {
 		lines = lines[:innerHeight]
 	}
@@ -399,7 +411,7 @@ func (m PickerModel) previewInnerHeight() int {
 // previewMaxScroll returns the largest valid m.previewScroll for the current
 // pane's scrollback. Used to clamp Alt+K scroll-up at the top of the buffer.
 func (m PickerModel) previewMaxScroll(innerHeight int) int {
-	if m.mode == ModeClose && m.closeTree != nil {
+	if m.hasCloseUI() {
 		return m.closeMaxScroll()
 	}
 	sha := m.previewSHA()
