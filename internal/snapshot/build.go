@@ -58,6 +58,9 @@ func Build(ctx context.Context, l Lister, host string, savedAt int64) (Manifest,
 	}
 
 	for _, s := range sessions {
+		if s.BridgeHost != "" {
+			continue
+		}
 		sess := Session{Name: s.Name, LastAttached: s.LastAttached}
 		for _, w := range winsBySess[s.Name] {
 			win := Window{Index: w.Index, Name: w.Name, Layout: w.Layout, ID: w.ID, AutomaticRename: w.AutomaticRename, Decoration: w.Decoration}

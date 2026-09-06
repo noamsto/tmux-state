@@ -41,7 +41,7 @@ func (s scopedTmux) Run(ctx context.Context, args []string) (string, error) {
 	return string(out), nil
 }
 func (s scopedTmux) ListSessions(ctx context.Context) ([]tmux.SessionRow, error) {
-	out, err := s.Run(ctx, []string{"list-sessions", "-F", "#{session_name}\x1f#{session_last_attached}"})
+	out, err := s.Run(ctx, []string{"list-sessions", "-F", "#{session_name}\x1f#{session_last_attached}\x1f#{@bridge_host}"})
 	if err != nil {
 		return nil, nil //nolint:nilerr
 	}

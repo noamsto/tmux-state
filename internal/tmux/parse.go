@@ -14,9 +14,11 @@ const FieldSep = "\x1f"
 type SessionRow struct {
 	Name         string
 	LastAttached int64
+	BridgeHost   string // @bridge_host session option; non-empty means this session is a lazytmux remote-bridge mirror
 }
 
-// ParseSessions parses the output of `tmux list-sessions -F "<name>\x1f<last_attached>"`.
+// ParseSessions parses the output of
+// `tmux list-sessions -F "<name>\x1f<last_attached>\x1f<@bridge_host>"`.
 func ParseSessions(s string) ([]SessionRow, error) {
 	if s == "" {
 		return nil, nil
@@ -24,14 +26,14 @@ func ParseSessions(s string) ([]SessionRow, error) {
 	var out []SessionRow
 	for i, line := range splitLines(s) {
 		fields := strings.Split(line, FieldSep)
-		if len(fields) != 2 {
-			return nil, fmt.Errorf("line %d: expected 2 fields, got %d (%q)", i+1, len(fields), line)
+		if len(fields) != 3 {
+			return nil, fmt.Errorf("line %d: expected 3 fields, got %d (%q)", i+1, len(fields), line)
 		}
 		la, err := parseIntOrZero(fields[1])
 		if err != nil {
 			return nil, fmt.Errorf("line %d: parse last_attached: %w", i+1, err)
 		}
-		out = append(out, SessionRow{Name: fields[0], LastAttached: la})
+		out = append(out, SessionRow{Name: fields[0], LastAttached: la, BridgeHost: fields[2]})
 	}
 	return out, nil
 }

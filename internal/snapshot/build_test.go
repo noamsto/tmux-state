@@ -90,6 +90,71 @@ func TestBuildCarriesDecoration(t *testing.T) {
 	}
 }
 
+func TestBuildSkipsBridgeSessions(t *testing.T) {
+	tests := []struct {
+		name     string
+		sessions []tmux.SessionRow
+		windows  []tmux.WindowRow
+		panes    []tmux.PaneRow
+		want     []string // session names expected in the manifest
+	}{
+		{
+			name:     "bridge session alone",
+			sessions: []tmux.SessionRow{{Name: "host-remote", BridgeHost: "host"}},
+			windows:  []tmux.WindowRow{{Session: "host-remote", Index: 1}},
+			panes:    []tmux.PaneRow{{Session: "host-remote", WindowIndex: 1, PaneIndex: 1}},
+			want:     nil,
+		},
+		{
+			name: "bridge session mixed with normal",
+			sessions: []tmux.SessionRow{
+				{Name: "host-remote", BridgeHost: "host"},
+				{Name: "local", LastAttached: 5},
+			},
+			windows: []tmux.WindowRow{
+				{Session: "host-remote", Index: 1},
+				{Session: "local", Index: 1},
+			},
+			panes: []tmux.PaneRow{
+				{Session: "host-remote", WindowIndex: 1, PaneIndex: 1},
+				{Session: "local", WindowIndex: 1, PaneIndex: 1},
+			},
+			want: []string{"local"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fc := &fakeClient{sessions: tt.sessions, windows: tt.windows, panes: tt.panes}
+			m, err := snapshot.Build(context.Background(), fc, "h", 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got []string
+			for _, s := range m.Sessions {
+				got = append(got, s.Name)
+			}
+			if len(got) != len(tt.want) {
+				t.Fatalf("sessions = %v, want %v", got, tt.want)
+			}
+			for i, name := range tt.want {
+				if got[i] != name {
+					t.Errorf("sessions[%d] = %q, want %q", i, got[i], name)
+				}
+			}
+			for _, s := range m.Sessions {
+				if s.Name == "host-remote" {
+					t.Errorf("bridge session leaked into manifest: %+v", s)
+				}
+			}
+			for _, s := range m.Sessions {
+				if len(s.Windows) == 0 {
+					t.Errorf("session %q has no windows, want its own windows/panes intact", s.Name)
+				}
+			}
+		})
+	}
+}
+
 func TestBuildPopulatesChildCountFromPID(t *testing.T) {
 	// Use the current process PID as a sentinel — it has at least 0 children
 	// and we can verify the field is set (not whatever the zero value is from
