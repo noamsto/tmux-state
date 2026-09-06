@@ -14,9 +14,8 @@ import (
 // View renders the full picker UI. Called by Bubble Tea after every Update.
 func (m PickerModel) View() tea.View {
 	if m.showHelp {
-		// m.keys.mode isn't kept in sync at construction time (it's never set
-		// by defaultKeys/NewPickerModel), so stamp the live mode on here —
-		// the one place ShortHelp/FullHelp are actually consulted.
+		// keyMap.mode is never set at construction, so stamp the live mode on
+		// here — the one place ShortHelp/FullHelp are consulted.
 		helpKeys := m.keys
 		helpKeys.mode = m.mode
 		hm := m.help
@@ -43,7 +42,7 @@ func (m PickerModel) View() tea.View {
 		content = lipgloss.JoinVertical(lipgloss.Left, renderCloseTree(m, m.width, bodyHeight), footer)
 	case m.mode == ModeClose && m.closeTree != nil:
 		// Close tree beside the preview of what the cursor's close would
-		// reopen. No sub-manifest column: it restated the tree.
+		// reopen.
 		closes := renderCloseTree(m, listWidth, bodyHeight)
 		preview := m.renderPreview(previewWidth)
 		body := lipgloss.JoinHorizontal(lipgloss.Top, closes, preview)
@@ -181,14 +180,11 @@ func (m PickerModel) paneWidthsThree() (int, int, int) {
 		return m.width, 0, 0
 	}
 	if m.mode == ModeClose {
-		// Two columns: no sub-manifest pane, since it restated the hierarchy
-		// the close tree already draws. 40% keeps the tree past its 32-cell
-		// floor for deep guide prefixes and long session labels, and leaves
-		// the preview at least 30 cells — enough for a pane map and the
-		// restore sentence under it. Both bounds hold automatically once
-		// width>=80 (the guard above): 2w/5>=32 and w-2w/5>=30, so no clamp
-		// is needed here — only if that threshold ever moves does one become
-		// necessary again.
+		// 40% keeps the tree past its 32-cell floor for deep guide prefixes
+		// and long session labels, and leaves the preview at least 30 cells —
+		// enough for a pane map and the restore sentence under it. Both bounds
+		// hold for every width the guard above admits (2w/5 >= 32 and
+		// w-2w/5 >= 30 once w >= 80), so neither needs a clamp.
 		treeW := m.width * 2 / 5
 		return treeW, 0, m.width - treeW
 	}
@@ -315,12 +311,11 @@ func renderCloseTree(m PickerModel, width, height int) string {
 	return frame.Render(b.String())
 }
 
-// closeMarker precedes every restorable row. Scaffolding at the same depth
-// gets the same two cells of blank, so a restorable row's label lines up with
-// a scaffolding row's — but only between rows that agree on having children:
-// the expand marker ("▾ "/"▸ ") emitted just before this is present only for
-// rows with children, so a parent row's label still starts two cells right of
-// a childless row's at the same depth.
+// closeMarker precedes every restorable row; scaffolding at the same depth
+// gets two cells of blank instead, so their labels line up. Alignment only
+// holds between rows that agree on having children: the expand marker
+// ("▾ "/"▸ ") emitted just before this is absent on childless rows, so a
+// parent's label still starts two cells right of a childless row's.
 const closeMarker = "● "
 
 // closeRow renders one tree row: guide prefix, expand marker, restore marker,

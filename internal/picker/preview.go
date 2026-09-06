@@ -108,8 +108,6 @@ func (m PickerModel) renderPreview(width int) string {
 }
 
 // renderClosePreview draws the panel for whatever close row the cursor is on.
-// Unlike snapshot mode there is no second tree to focus first: prefix+U opens
-// with this already showing.
 func (m PickerModel) renderClosePreview(width int) string {
 	frameHeight := m.panelFrameHeight()
 	innerHeight := m.previewInnerHeight()
@@ -139,9 +137,8 @@ func (m PickerModel) renderClosePreview(width int) string {
 		if m.loadingSHAs[sha] {
 			return frame.Render(rowDim.Render("(loading scrollback…)"))
 		}
-		// The pane has scrollback but no load is in flight. Say so rather than
-		// falling through to the map, which would silently change content type
-		// once a load lands.
+		// Falling through to the map here would swap the panel's content type
+		// the moment a load lands.
 		return frame.Render(rowDim.Render("(scrollback pending)"))
 	}
 	w := closePreviewWindow(cc)
@@ -149,11 +146,8 @@ func (m PickerModel) renderClosePreview(width int) string {
 	// A lipgloss frame pads short content but does not clip overflow — once the
 	// body already has more lines than fit, MaxHeight hard-truncates the line
 	// list, which drops the closing border row rather than the excess content.
-	// So the body must never exceed innerHeight lines. The sentence is the only
-	// thing that says what Enter would do; the map (or its "nothing captured"
-	// stand-in) is decoration. So when the frame is too short for both, drop
-	// that decoration first, and truncate the sentence itself only once even
-	// that alone does not fit.
+	// So the body must never exceed innerHeight lines: the map yields its rows
+	// to the sentence, which is truncated only once it alone does not fit.
 	if len(sentence) > innerHeight {
 		sentence = sentence[:innerHeight]
 	}
@@ -186,16 +180,12 @@ func (m PickerModel) renderClosePreview(width int) string {
 // placement names, or the sub-manifest's first window for a session close,
 // where every window came down and the first one stands for the rest.
 //
-// It prefers the session named by the placement, then falls back to dropping
-// the name filter — but only when the sub-manifest holds exactly one session,
-// so there is no other candidate it could mean. The two names are
-// independently sourced — Placement.Session from the tmux hook, the
-// sub-manifest's from the prior snapshot — and can disagree when the session
-// was renamed in between (see closeevent.OwnerSession's fallback chain);
-// treating the name as a hard filter turned that mismatch into a blank
-// preview instead of a degraded one. With more than one session in the
-// sub-manifest, dropping the filter would instead risk drawing a window that
-// belongs to a different session than the one that closed.
+// The two session names are independently sourced — Placement.Session from the
+// tmux hook, the sub-manifest's from the prior snapshot — and can disagree when
+// the session was renamed in between (see closeevent.OwnerSession's fallback
+// chain), so a name mismatch falls back to ignoring the name. Only with exactly
+// one session in the sub-manifest, though: past that, ignoring it could draw a
+// window belonging to a session other than the one that closed.
 func closePreviewWindow(cc CloseContext) *snapshot.Window {
 	if w := closePreviewWindowIn(cc, true); w != nil {
 		return w
@@ -345,8 +335,7 @@ func (m PickerModel) renderWindowMap(w *snapshot.Window, innerWidth, innerHeight
 }
 
 // restoreSentence states what Enter on this close would do, in the terms the
-// restore path actually honours: a window goes back to its original index, so
-// naming the index here is a promise rather than a guess.
+// restore path actually honours — a window goes back to its original index.
 func restoreSentence(p ClosePlacement, man snapshot.Manifest, now time.Time, ts int64) []string {
 	var out []string
 	switch p.Scope {
@@ -371,8 +360,6 @@ func restoreSentence(p ClosePlacement, man snapshot.Manifest, now time.Time, ts 
 }
 
 // humanAge renders a duration as the coarsest unit that still reads true.
-// The row already carries the wall-clock time; this is the "and how long ago
-// was that" the wall clock cannot answer once a close is a day old.
 func humanAge(d time.Duration) string {
 	switch {
 	case d < time.Minute:

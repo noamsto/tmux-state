@@ -383,9 +383,9 @@ func revealedLabels(nodes []*picker.CloseNode) []string {
 }
 
 // nestedCloseModel builds a bootstrapped close-mode picker over a session →
-// window → pane scaffolding chain. Distinct from the existing closeModel(t,
-// hidden) at model_test.go:228, which has no scaffolding to skip: lazytmux is gone, its window 3 is a live header, and
-// the only restorable thing inside it is a pane close.
+// window → pane scaffolding chain, which closeModel has none of: lazytmux is
+// gone, its window 3 is a live header, and the only restorable thing inside it
+// is a pane close.
 func nestedCloseModel(t *testing.T) picker.PickerModel {
 	t.Helper()
 	evs := []store.Event{{ID: 1, Ts: 300, Kind: "pane-died"}}

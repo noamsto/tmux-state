@@ -137,7 +137,6 @@ func (m PickerModel) ScrollbackError(sha string) error { return m.scrollbackErro
 // Init satisfies tea.Model. Close mode's preview is live from the first frame,
 // so the cursor's scrollback has to be scheduled before any key arrives —
 // otherwise the panel falls back to the window map until the user moves.
-// Snapshot mode has no SHA until Tab, so PreviewCmd returns nil there.
 func (m PickerModel) Init() tea.Cmd { return (&m).PreviewCmd() }
 
 // Update handles key events. Implementation grows across the next few tasks.
@@ -326,9 +325,7 @@ func (m PickerModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// after this clear.
 	m.footerNote = ""
 	// Close mode with a grouped tree: the cursor walks tree rows, so Up/Down
-	// skip headers and Left/Right collapse and expand them. Close mode never
-	// leaves focusList — Tab is snapshot-only — so the guard is an assertion
-	// that the arrows belong to this cursor, not a mode the user can exit.
+	// skip headers and Left/Right collapse and expand them.
 	if m.mode == ModeClose && m.closeTree != nil && m.focus == focusList {
 		vis := m.CloseVisible()
 		switch {
@@ -362,11 +359,8 @@ func (m PickerModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 					n.Expanded = false
 					return m, nil
 				}
-				// Walk up to the nearest collapsible ancestor below the
-				// synthetic root and collapse it. The cursor cannot step onto
-				// that ancestor when it is scaffolding, so land on the nearest
-				// stop at or above where it sits — the enclosing group header
-				// in the worst case.
+				// Collapse the nearest collapsible ancestor below the
+				// synthetic root, then land on a row the cursor may occupy.
 				for a := n.Parent; a != nil && a.Parent != nil; a = a.Parent {
 					if !a.Expanded || len(a.Children) == 0 {
 						continue
@@ -426,8 +420,8 @@ func (m PickerModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	// Focus-tree key handling: intercept Up/Down/Left/Right so they walk the
-	// manifest tree's panes. Snapshot mode only — close mode has no second tree
-	// to focus, so Tab never moves it off focusList.
+	// manifest tree's panes. Snapshot mode only: nothing moves focus off
+	// focusList in close mode.
 	if m.mode == ModeSnapshot && m.focus == focusTree {
 		switch {
 		case key.Matches(msg, m.keys.Up):
@@ -767,8 +761,7 @@ func (m *PickerModel) PreviewCmd() tea.Cmd {
 
 // previewSHA returns the ScrollbackSHA the preview is currently showing, or ""
 // when it is not showing scrollback. Close mode reads the close-tree cursor and
-// ignores focus — its preview is live from the first frame; snapshot mode still
-// requires Tab to reach its tree.
+// ignores focus; snapshot mode requires Tab to reach its tree.
 func (m PickerModel) previewSHA() string {
 	if m.mode == ModeClose && m.closeTree != nil {
 		return m.closeCursorSHA()
@@ -792,8 +785,7 @@ func (m PickerModel) previewSHA() string {
 }
 
 // closeCursorSHA resolves the cursor's close context and returns its scrollback
-// hash. renderClosePreview has the context in hand already and calls
-// closeSHAFor directly rather than flattening the tree a second time.
+// hash.
 func (m PickerModel) closeCursorSHA() string {
 	vis := m.CloseVisible()
 	if m.cursor < 0 || m.cursor >= len(vis) {
