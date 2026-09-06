@@ -103,11 +103,8 @@ func (m PickerModel) renderFooter(width int) string {
 	sep := footerSep.Render(" · ")
 
 	var parts []string
-	// The three filter toggles and the pane counter are snapshot mode's alone.
-	// Close mode restores the closed entity whole — nothing on that path reads
-	// m.filter, and the age toggle only dims snapshot rows — so in close mode
-	// all four would sit in front of ↵:restore describing nothing. The close
-	// preview's header carries the truthful count instead.
+	// The three filter toggles and the pane counter are snapshot mode's alone;
+	// close mode's header carries its own count.
 	if m.mode == ModeSnapshot {
 		c := m.CurrentCounts()
 		parts = append(parts,
@@ -571,9 +568,9 @@ func shortReason(r string) string {
 }
 
 // closeListView holds the facts a single flat close row cannot work out on its
-// own: the contexts its columns read, which sessions are still alive, and —
-// the reason this type exists — each session's modal cwd, which decides
-// whether the cwd column earns its width on a given row.
+// own: the contexts its columns read, which sessions are still alive, and each
+// session's modal cwd, which decides whether the cwd column earns its width on
+// a given row.
 type closeListView struct {
 	ctxs  map[int64]CloseContext
 	live  map[string]bool
@@ -713,8 +710,7 @@ const closeMarker = "● "
 const closeKindWidth = 7
 
 // renderRow renders one flat close row as a single line of exactly innerWidth
-// cells. Section headers render their text alone — no marker, since the marker
-// column means "restorable".
+// cells. Section headers render their text alone.
 func (v closeListView) renderRow(r CloseRow, innerWidth int, active bool) string {
 	if innerWidth < 1 {
 		innerWidth = 1

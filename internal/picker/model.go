@@ -325,13 +325,10 @@ func (m PickerModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// recoverable row. Handlers that want to surface a fresh note set it
 	// after this clear.
 	m.footerNote = ""
-	// Close mode: the cursor walks closeRows, skipping section headers. There
-	// is no hierarchy to expand or collapse, so Left/Right fall through
-	// unhandled — Up/Down/Enter is the whole nav story. The branch claims
-	// every close-mode Up/Down/Enter even with no rows to walk, so an empty
-	// list can never fall through to the snapshot handler below and start
-	// paging m.events, which in close mode holds the unrecoverable events the
-	// list deliberately does not show.
+	// Close mode: the cursor walks closeRows, skipping section headers. The
+	// branch claims Up/Down/Enter even with no rows to walk — falling through
+	// would page m.events, which in close mode holds the unrecoverable events
+	// the list deliberately does not show.
 	if m.mode == ModeClose {
 		switch {
 		case key.Matches(msg, m.keys.Up):
@@ -483,9 +480,7 @@ func (m PickerModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, (&m).PreviewCmd()
 	// The three filter toggles are snapshot mode's: close mode's restore path
-	// never reads m.filter, and only the snapshot list dims by age. Gated here
-	// rather than left to fall through, so that the footer and the `?` overlay
-	// — which drop all three in close mode — describe what the keys really do.
+	// never reads m.filter, and only the snapshot list dims by age.
 	case m.mode == ModeSnapshot && key.Matches(msg, m.keys.ToggleIdle):
 		m.filter.SkipIdleShells = !m.filter.SkipIdleShells
 		(&m).redecorate()
@@ -563,9 +558,8 @@ func (m PickerModel) Filter() filter.Filter { return m.filter }
 func (m PickerModel) SelectedID() int64 { return m.selectedID }
 
 // SelectedManifest returns the parsed manifest of the selected event. Snapshot
-// mode hands it to restore.BuildPlan. Close mode does not: buildRestorePlan
-// restores from the ClosedItem's own Pane/Window pointers, and reads the
-// sub-manifest only for shape checks and to name the session to focus.
+// mode hands it to restore.BuildPlan; close mode restores from the
+// ClosedItem's own Pane/Window pointers instead.
 func (m PickerModel) SelectedManifest() snapshot.Manifest {
 	if m.selectedID == 0 {
 		return snapshot.Manifest{}
@@ -640,9 +634,7 @@ func (m PickerModel) nextCloseRowIdx(start, dir int) int {
 
 // firstSelectableCloseRow returns the index of the first selectable row in
 // rows — the newest close, since BuildCloseList sorts each section
-// newest-first — or 0 when rows has no selectable row at all (an empty list
-// included, where 0 is out of range and every reader treats it as nothing
-// selected).
+// newest-first — or 0 when there is none.
 func firstSelectableCloseRow(rows []CloseRow) int {
 	for i, r := range rows {
 		if r.Selectable() {
@@ -757,11 +749,8 @@ func (m PickerModel) closeCursorSHAs() []string {
 // caching the result. No-op on cache hit. Records parse errors in
 // m.manifestErrors so View can render "(invalid manifest)".
 //
-// Snapshot mode only: every reader of m.manifests and m.trees — the tree pane,
-// the pane preview, the footer counter and Enter's manifest check — is behind a
-// snapshot-mode branch. Close mode restores and previews from closeContexts,
-// and its cursor indexes closeRows rather than m.events, so there is nothing
-// here for it to parse.
+// Snapshot mode only: close mode restores and previews from closeContexts, and
+// its cursor indexes closeRows rather than m.events.
 func (m *PickerModel) ensureManifest() {
 	if m.mode == ModeClose {
 		return

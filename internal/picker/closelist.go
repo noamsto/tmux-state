@@ -49,7 +49,6 @@ func (r CloseRow) Selectable() bool {
 
 const sectionOther = "OTHER SESSIONS"
 
-// sectionThis returns the "this session" header text for current.
 func sectionThis(current string) string {
 	return "THIS SESSION · " + current
 }
@@ -67,12 +66,10 @@ type collapseKey struct {
 }
 
 // closedPaneInfo returns the command and cwd of the pane a close event took
-// down, for use as part of a collapseKey. For a pane-scope close it looks up
-// the died pane by Placement.PaneID rather than assuming it's first in the
-// window, since the sub-manifest also carries the died pane's siblings. For
-// a window-scope close it uses the window's first pane — the representative
-// case, since 3+-pane windows don't occur in practice. A session-scope close
-// has no single closed pane and always returns the zero value.
+// down, for use as part of a collapseKey. A pane-scope close is looked up by
+// Placement.PaneID, since the sub-manifest also carries the died pane's
+// surviving siblings; a window-scope close uses the window's first pane. A
+// session-scope close has no single closed pane and returns the zero value.
 func closedPaneInfo(cc CloseContext) (cmd, cwd string) {
 	if cc.Placement.Scope == "session" {
 		return "", ""
@@ -107,10 +104,8 @@ type closeGroup struct {
 // section header is emitted only when it has at least one close under it.
 //
 // Events with an empty SubManifest.Sessions are excluded — the caller counts
-// them as hidden rather than listing a dead row.
-//
-// evs is expected newest-first (store.ListEvents orders by ts DESC), but the
-// result does not depend on that — every section is sorted by Ts at the end.
+// them as hidden rather than listing a dead row. evs may arrive in any order;
+// every section is sorted by Ts at the end.
 func BuildCloseList(evs []store.Event, ctxs map[int64]CloseContext, current string) []CloseRow {
 	var thisGroups, otherGroups []*closeGroup
 	thisIdx := map[collapseKey]*closeGroup{}

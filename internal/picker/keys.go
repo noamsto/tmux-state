@@ -3,11 +3,8 @@ package picker
 import "charm.land/bubbles/v2/key"
 
 type keyMap struct {
-	// mode gates Tab, Left and Right out of the help listings in close mode,
-	// where they are bound but inert (see model.go's Tab case, and the flat
-	// close list's Up/Down/Enter-only handler). Left unset, the zero value
-	// ModeSnapshot lists all three, which is what every other keyMap literal
-	// wants.
+	// mode drops the bindings that are inert in close mode from the help
+	// listings. The zero value, ModeSnapshot, lists them all.
 	mode                      Mode
 	Up, Down                  key.Binding
 	Left, Right               key.Binding
@@ -44,10 +41,7 @@ func defaultKeys() keyMap {
 
 // ShortHelp / FullHelp satisfy bubbles' help.KeyMap. Only FullHelp reaches a
 // frame — the `?` overlay forces ShowAll and the footer writes its own hints —
-// but both must agree, so both drop Tab, the expand/collapse pair and the
-// three filter toggles in close mode, where all six are inert: the close list
-// is one level deep, its handler answers only Up, Down and Enter, and its
-// restore path never reads the filter.
+// but both must agree, so both drop the same bindings in close mode.
 func (k keyMap) ShortHelp() []key.Binding {
 	if k.mode == ModeClose {
 		return []key.Binding{k.Up, k.Down, k.Enter, k.Help, k.Quit}
