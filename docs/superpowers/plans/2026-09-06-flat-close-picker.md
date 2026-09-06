@@ -8,7 +8,7 @@
 
 **Tech Stack:** Go, `charm.land/bubbletea/v2`, `charm.land/bubbles/v2`, `charm.land/lipgloss/v2`, `github.com/charmbracelet/x/ansi`.
 
-**Issue:** [#104](https://github.com/noamsto/tmux-remux/issues/104). **Builds on:** [#103](https://github.com/noamsto/tmux-remux/pull/103), unmerged.
+**Issue:** [#104](https://github.com/noamsto/tmux-remux/issues/104). **Builds on:** [#103](https://github.com/noamsto/tmux-remux/pull/103), merged to main as `7c60986`.
 **Prototype (evidence, do not copy wholesale):** branch `proto/close-picker-layout`, `cmd/proto-layout/main.go`.
 
 ---
@@ -151,7 +151,10 @@ Do **not** key this on comparing the cwd's basename to the session name. The pro
 
 Check every consumer of `SubManifest` before changing it: `restoreSentence`, `paneCount`, the restore path in `cmd/tmux-remux`, and `BuildCloseList` from Task 1. A narrower sub-manifest must not silently change what a restore actually restores. If it would, say so and stop.
 
-**3b. Rewrite the close preview.** Delete the pane map from close mode — `renderWindowMap` stays for snapshot mode, which still has multi-pane windows. In its place:
+**3b. Rewrite the close preview.** Delete the pane map from close mode. In its place:
+
+**Do not touch snapshot mode's map machinery.** Main landed #97 while this branch was in flight, which added a mini-map *above* pane scrollback in snapshot mode: `paneHintShows`, `paneScrollbackHeight`, `paneContextMap` and `paneMapHintHeight`, alongside the existing `renderWindowMap`. All of it is snapshot-only — `paneHintShows` is guarded on `ModeSnapshot` — and all of it must survive this task intact, with `TestPickerModel_PaneViewShowsContextMap` still passing. Snapshot mode is the mode that actually has multi-pane windows; the map earns its place there.
+
 
 - Header: what this close was and when. Two lines, e.g. `halo-nix-amd-ai:1 · nix-amd-ai` then `window close · 2 panes · closed 2d ago`.
 - Body: the scrollback of **every pane the close took down**. One pane fills the panel. Two stack, with the available height divided between them.
