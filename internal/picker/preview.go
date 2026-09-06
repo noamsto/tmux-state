@@ -377,7 +377,11 @@ func previewWindow(s string, width, height, scroll, scrollX int) string {
 	lines := make([]string, len(raw))
 	for i, l := range raw {
 		if scrollX > 0 {
-			l = ansi.Cut(l, scrollX, scrollX+width)
+			// ansi.Cut can overshoot its upper bound by one cell when a
+			// double-width rune straddles it; re-truncating clamps that back
+			// to width without touching the common case where Cut already
+			// landed exactly on budget.
+			l = ansi.Truncate(ansi.Cut(l, scrollX, scrollX+width), width, "")
 		} else {
 			l = ansi.Truncate(l, width, "")
 		}

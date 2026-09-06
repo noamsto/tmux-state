@@ -287,6 +287,55 @@ func TestRenderPreview_Error(t *testing.T) {
 	}
 }
 
+// TestRenderPreview_NeverOverflowsFrameWithWideRunesScrolled is the snapshot
+// mode counterpart of TestRenderClosePreview_NeverOverflowsFrameWithWideRunesScrolled:
+// renderPreview's plain-pane path calls the same previewWindow, so it shares
+// the same ansi.Cut overshoot and the same dropped closing border once
+// previewScrollX > 0 lands a double-width rune on a cut boundary. Nothing
+// about the snapshot path makes it immune — it is just less likely to be hit
+// by hand, since it additionally requires focusing a pane node in the tree.
+func TestRenderPreview_NeverOverflowsFrameWithWideRunesScrolled(t *testing.T) {
+	applyTheme(NewTheme())
+	man := snapshot.Manifest{V: 1, Sessions: []snapshot.Session{{
+		Windows: []snapshot.Window{{Panes: []snapshot.Pane{{ScrollbackSHA: "abc"}}}},
+	}}}
+	raw, _ := json.Marshal(man)
+	ev := store.Event{ID: 1, Kind: "snapshot", ManifestJSON: string(raw)}
+	m := NewPickerModel(ModeSnapshot, []store.Event{ev}, nil, nil)
+	m.Bootstrap()
+	m.focus = focusTree
+	m.treeCursor = paneNodeIndex(t, m)
+
+	var b strings.Builder
+	for i := 1; i <= 200; i++ {
+		fmt.Fprintf(&b, "行%d 日本語プロジェクトの内容漢字文字列テスト絵文字📁📂🎉 line %d with tail text long enough to overflow a narrow panel\n", i, i)
+	}
+	m.scrollbacks["abc"] = []byte(b.String())
+
+	widths := []int{60, 80, 86, 100, 120}
+	heights := []int{12, 20, 30}
+	for _, w := range widths {
+		for _, h := range heights {
+			for scrollX := 1; scrollX <= 40; scrollX++ {
+				m.width, m.height = w, h
+				m.previewScrollX = scrollX
+				out := m.renderPreview(w)
+				if got := lipgloss.Height(out); got != m.panelFrameHeight() {
+					t.Errorf("w=%d h=%d scrollX=%d: rendered height=%d, want %d", w, h, scrollX, got, m.panelFrameHeight())
+				}
+				if got := lipgloss.Width(out); got != w {
+					t.Errorf("w=%d h=%d scrollX=%d: rendered width=%d, want %d", w, h, scrollX, got, w)
+				}
+				rows := strings.Split(out, "\n")
+				last := rows[len(rows)-1]
+				if !strings.ContainsRune(last, '╰') || !strings.ContainsRune(last, '╯') {
+					t.Errorf("w=%d h=%d scrollX=%d: frame did not close, last row is %q\n%s", w, h, scrollX, last, out)
+				}
+			}
+		}
+	}
+}
+
 // stripANSI removes ANSI escapes for assertion ergonomics.
 func stripANSI(s string) string {
 	return ansiRegexp.ReplaceAllString(s, "")
@@ -951,6 +1000,60 @@ func TestRenderClosePreview_NeverOverflowsFrame(t *testing.T) {
 			last := rows[len(rows)-1]
 			if !strings.ContainsRune(last, '╰') || !strings.ContainsRune(last, '╯') {
 				t.Errorf("scope=%s w=%d h=%d: frame did not close, last row is %q\n%s", scope, sz.w, sz.h, last, out)
+			}
+		}
+	}
+}
+
+// closePreviewWideRuneFixture is closePreviewFrameFixture's "window" scope
+// with scrollback stuffed with CJK and emoji runes in place of plain ASCII —
+// a stand-in for a real editor/agent pane, and the shape previewWindow's
+// horizontal-scroll path needs to overshoot its budget.
+func closePreviewWideRuneFixture(t *testing.T) PickerModel {
+	t.Helper()
+	m := closePreviewFrameFixture(t, "window")
+	var b strings.Builder
+	for i := 1; i <= 200; i++ {
+		fmt.Fprintf(&b, "行%d 日本語プロジェクトの内容漢字文字列テスト絵文字📁📂🎉 line %d with tail text long enough to overflow a narrow panel\n", i, i)
+	}
+	m.scrollbacks["sha0"] = []byte(b.String())
+	m.scrollbacks["sha1"] = []byte(b.String())
+	return m
+}
+
+// TestRenderClosePreview_NeverOverflowsFrameWithWideRunesScrolled guards the
+// same frame-closing invariant as TestRenderClosePreview_NeverOverflowsFrame,
+// through the one path that test's ASCII fixture can't reach: previewWindow
+// calls ansi.Cut instead of ansi.Truncate whenever previewScrollX > 0 (i.e.
+// after Alt+L), and ansi.Cut overshoots its budget by one cell when a
+// double-width rune straddles either boundary of the cut. The resulting
+// over-wide line wraps inside the lipgloss frame, and MaxHeight's
+// hard-truncation of the rendered line list drops the closing border row —
+// invisible to a height assertion, since the reported height stays exact.
+// Reachable in production with CJK/emoji scrollback and any non-zero
+// previewScrollX.
+func TestRenderClosePreview_NeverOverflowsFrameWithWideRunesScrolled(t *testing.T) {
+	applyTheme(NewTheme())
+	m := closePreviewWideRuneFixture(t)
+	widths := []int{60, 80, 86, 100, 120}
+	heights := []int{12, 20, 30}
+	for _, w := range widths {
+		for _, h := range heights {
+			for scrollX := 1; scrollX <= 40; scrollX++ {
+				m.width, m.height = w, h
+				m.previewScrollX = scrollX
+				out := m.renderClosePreview(w)
+				if got := lipgloss.Height(out); got != m.panelFrameHeight() {
+					t.Errorf("w=%d h=%d scrollX=%d: rendered height=%d, want %d", w, h, scrollX, got, m.panelFrameHeight())
+				}
+				if got := lipgloss.Width(out); got != w {
+					t.Errorf("w=%d h=%d scrollX=%d: rendered width=%d, want %d", w, h, scrollX, got, w)
+				}
+				rows := strings.Split(out, "\n")
+				last := rows[len(rows)-1]
+				if !strings.ContainsRune(last, '╰') || !strings.ContainsRune(last, '╯') {
+					t.Errorf("w=%d h=%d scrollX=%d: frame did not close, last row is %q\n%s", w, h, scrollX, last, out)
+				}
 			}
 		}
 	}
