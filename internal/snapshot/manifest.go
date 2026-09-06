@@ -26,11 +26,17 @@ func StripFormat(s string) string {
 
 // Manifest is the top-level snapshot envelope persisted in events.manifest_json.
 type Manifest struct {
-	V        int       `json:"v"`
-	Host     string    `json:"host"`
-	TmuxPID  int       `json:"tmux_pid,omitempty"`
-	SavedAt  int64     `json:"saved_at"`
-	Sessions []Session `json:"sessions"`
+	V       int    `json:"v"`
+	Host    string `json:"host"`
+	TmuxPID int    `json:"tmux_pid,omitempty"`
+	SavedAt int64  `json:"saved_at"`
+	// ScrollbackSkipped is true when this snapshot deliberately skipped
+	// capturing pane scrollback (min_save_interval throttle), as opposed to
+	// a pane simply never having had scrollback captured. The picker uses
+	// this to tell "throttled" apart from "nothing captured yet" in the
+	// preview.
+	ScrollbackSkipped bool      `json:"scrollback_skipped,omitempty"`
+	Sessions          []Session `json:"sessions"`
 }
 
 // Session captures one tmux session's structure.

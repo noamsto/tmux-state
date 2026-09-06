@@ -1,14 +1,12 @@
 package picker
 
 import (
-	"encoding/json"
 	"image/color"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 
 	"charm.land/lipgloss/v2"
+	"github.com/noamsto/themestate"
 )
 
 // Theme resolves Catppuccin role colors from tmux options, with hardcoded
@@ -23,7 +21,7 @@ type Theme struct {
 // best-effort; failures fall back to Mocha defaults.
 func NewTheme() Theme {
 	return Theme{
-		flavour:  detectFlavour(),
+		flavour:  themestate.Detect(),
 		tmuxOpts: readTmuxOpts(),
 	}
 }
@@ -70,28 +68,6 @@ func (t Theme) Red() color.Color { return t.color("@thm_red", "#f38ba8", "#d20f3
 
 // Lavender returns the Catppuccin lavender accent used for footer key labels.
 func (t Theme) Lavender() color.Color { return t.color("@thm_lavender", "#b4befe", "#7287fd") }
-
-func detectFlavour() string {
-	xdg := os.Getenv("XDG_STATE_HOME")
-	if xdg == "" {
-		if home := os.Getenv("HOME"); home != "" {
-			xdg = filepath.Join(home, ".local", "state")
-		}
-	}
-	// xdg comes from $XDG_STATE_HOME (user's own env); filename is hardcoded.
-	// Worst case we read a file the user already owns and choose a wrong theme.
-	data, err := os.ReadFile(filepath.Join(xdg, "theme-state.json")) // #nosec G304,G703
-	if err != nil {
-		return "dark"
-	}
-	var cfg struct {
-		Theme string `json:"theme"`
-	}
-	if json.Unmarshal(data, &cfg) != nil || cfg.Theme == "" {
-		return "dark"
-	}
-	return cfg.Theme
-}
 
 func readTmuxOpts() map[string]string {
 	out, err := exec.Command("tmux", "show", "-g").Output()

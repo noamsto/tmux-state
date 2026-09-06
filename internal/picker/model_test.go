@@ -223,6 +223,30 @@ func TestModel_ViewHighlightsTreeCursor(t *testing.T) {
 	}
 }
 
+// TestModel_CollapsedRunningSessionExplainsHiddenPanes guards the fix for a
+// session auto-collapsed by the running-session filter: the bullet still
+// promises expandable content, but every descendant is filtered out too, so
+// the row must say why instead of just "(running)".
+func TestModel_CollapsedRunningSessionExplainsHiddenPanes(t *testing.T) {
+	events := []store.Event{{
+		ID: 1, Ts: time.Now().UnixMilli(), Kind: "snapshot",
+		ManifestJSON: `{"v":1,"sessions":[{"name":"demo","windows":[{"name":"w","panes":[{"index":0,"command":"nvim"},{"index":1,"command":"fish"}]}]}]}`,
+	}}
+	running := map[string]bool{"demo": true}
+	m := picker.NewPickerModel(picker.ModeSnapshot, events, running, nil)
+	m.Bootstrap()
+	upd, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	pm := upd.(picker.PickerModel)
+
+	out := pm.View().Content
+	if !strings.Contains(out, "2 panes hidden — d:ski") {
+		t.Errorf("expected hidden-panes note, got:\n%s", out)
+	}
+	if strings.Contains(out, "(running)") {
+		t.Errorf("collapsed running session should not fall back to bare (running), got:\n%s", out)
+	}
+}
+
 // closeModel builds a close-mode picker with one recoverable event whose
 // context carries a label + a one-session sub-manifest, plus a hidden count.
 func closeModel(t *testing.T, hidden int) picker.PickerModel {

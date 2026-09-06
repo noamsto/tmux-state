@@ -96,6 +96,25 @@ func TestBuildTree_PaneLabel_HomeRelativeCwd(t *testing.T) {
 	}
 }
 
+func TestBuildTree_PaneLabel_LeadsWithIndex(t *testing.T) {
+	// The tree row leads with the pane index so it matches the numbered box in
+	// the map — the handle that disambiguates two panes running the same command.
+	m := snapshot.Manifest{
+		Sessions: []snapshot.Session{{
+			Name: "s",
+			Windows: []snapshot.Window{{
+				Name:  "w",
+				Panes: []snapshot.Pane{{Index: 2, Command: "fish"}},
+			}},
+		}},
+	}
+	root := picker.BuildTree(m)
+	got := root.Children[0].Children[0].Children[0].Label
+	if !strings.HasPrefix(got, "2 ") {
+		t.Errorf("pane label = %q, want it to lead with the pane index", got)
+	}
+}
+
 func TestFilterDecorate_NoToggles_AllKept(t *testing.T) {
 	m := snapshot.Manifest{
 		Sessions: []snapshot.Session{{

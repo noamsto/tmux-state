@@ -132,15 +132,16 @@ func (s *Store) InsertEvent(ctx context.Context, ev Event) (int64, error) {
 }
 
 // LatestSnapshotBefore returns the newest snapshot event whose timestamp is
-// strictly less than `ts`, or (nil, nil) when none exists. Used by the close-
-// event picker to recover the pre-close state for diffing + restoration, and by
-// restore to anchor selection to before the current server started.
+// strictly less than `ts` (id as tiebreak for same-millisecond saves), or
+// (nil, nil) when none exists. Used by the close-event picker to recover the
+// pre-close state for diffing + restoration, and by restore to anchor
+// selection to before the current server started.
 func (s *Store) LatestSnapshotBefore(ctx context.Context, ts int64) (*Event, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, ts, kind, scope, reason, host, parent_event_id, manifest_json
 		FROM events
 		WHERE kind = 'snapshot' AND ts < ?
-		ORDER BY ts DESC
+		ORDER BY ts DESC, id DESC
 		LIMIT 1
 	`, ts)
 	var ev Event
@@ -154,14 +155,15 @@ func (s *Store) LatestSnapshotBefore(ctx context.Context, ts int64) (*Event, err
 	return &ev, nil
 }
 
-// LatestSnapshot returns the newest snapshot event by timestamp, or (nil, nil)
-// when no snapshot exists.
+// LatestSnapshot returns the newest snapshot event by timestamp (id as
+// tiebreak for same-millisecond saves), or (nil, nil) when no snapshot
+// exists.
 func (s *Store) LatestSnapshot(ctx context.Context) (*Event, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, ts, kind, scope, reason, host, parent_event_id, manifest_json
 		FROM events
 		WHERE kind = 'snapshot'
-		ORDER BY ts DESC
+		ORDER BY ts DESC, id DESC
 		LIMIT 1
 	`)
 	var ev Event
@@ -182,7 +184,7 @@ type ListOpts struct {
 	Limit        int      // 0 = no limit
 }
 
-// ListEvents returns events matching opts, ordered by ts DESC.
+// ListEvents returns events matching opts, ordered by ts DESC, id DESC.
 func (s *Store) ListEvents(ctx context.Context, opts ListOpts) ([]Event, error) {
 	var b strings.Builder
 	b.WriteString(`SELECT id, ts, kind, scope, reason, host, parent_event_id, manifest_json FROM events`)
@@ -208,7 +210,7 @@ func (s *Store) ListEvents(ctx context.Context, opts ListOpts) ([]Event, error) 
 		b.WriteString(" WHERE ")
 		b.WriteString(strings.Join(clauses, " AND "))
 	}
-	b.WriteString(" ORDER BY ts DESC")
+	b.WriteString(" ORDER BY ts DESC, id DESC")
 	if opts.Limit > 0 {
 		b.WriteString(" LIMIT ?")
 		args = append(args, opts.Limit)

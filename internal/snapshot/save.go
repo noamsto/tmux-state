@@ -95,6 +95,8 @@ func (s *Saver) Save(ctx context.Context, reason string) error {
 		if err := s.captureScrollbacks(ctx, &manifest); err != nil {
 			return err
 		}
+	} else if s.opts.CaptureScrollback {
+		manifest.ScrollbackSkipped = true
 	}
 
 	manifestJSON, err := json.Marshal(manifest)

@@ -456,10 +456,13 @@ func renderTree(m PickerModel, width, height int) string {
 	if m.focus == focusTree {
 		highlightIdx = m.treeCursor
 	}
+	skipRunningHint := m.keys.ToggleSkipRunning.Help()
+	toggleHint := skipRunningHint.Key + ":" + skipRunningHint.Desc
+
 	idx := 0
 	var rows []string
 	for _, sess := range tree.Children {
-		appendNodeRows(&rows, sess, 0, &idx, highlightIdx)
+		appendNodeRows(&rows, sess, 0, &idx, highlightIdx, toggleHint)
 	}
 
 	// Header (1) + border (2) consume 3 rows inside the frame's height.
@@ -481,7 +484,7 @@ func renderTree(m PickerModel, width, height int) string {
 // rooted at n. idx tracks the position in the flat visible-node list and is
 // incremented for each row appended. highlightIdx is the row to mark active
 // (−1 = none). Caller windows the returned slice for scrolling.
-func appendNodeRows(rows *[]string, n *TreeNode, depth int, idx *int, highlightIdx int) {
+func appendNodeRows(rows *[]string, n *TreeNode, depth int, idx *int, highlightIdx int, toggleHint string) {
 	indent := strings.Repeat("  ", depth)
 	bullet := "•"
 	if len(n.Children) > 0 {
@@ -489,6 +492,14 @@ func appendNodeRows(rows *[]string, n *TreeNode, depth int, idx *int, highlightI
 			bullet = "▾"
 		} else {
 			bullet = "▸"
+		}
+	}
+	// A session collapsed by the running-session filter has nothing new to
+	// reveal on expand, unlike other skip reasons — name what's hidden.
+	note := "(" + n.SkipReason + ")"
+	if n.Skipped && n.SkipReason == "running" && !n.Expanded {
+		if hidden := countPanes(n); hidden > 0 {
+			note = fmt.Sprintf("%d panes hidden — %s", hidden, toggleHint)
 		}
 	}
 	active := *idx == highlightIdx
@@ -500,7 +511,7 @@ func appendNodeRows(rows *[]string, n *TreeNode, depth int, idx *int, highlightI
 		// once, plain.
 		line := fmt.Sprintf("%s%s %s", indent, bullet, n.Label)
 		if n.Skipped && n.SkipReason != "" {
-			line = line + "  (" + n.SkipReason + ")"
+			line = line + "  " + note
 		}
 		rendered = rowActive.Render(line)
 	} else {
@@ -520,7 +531,7 @@ func appendNodeRows(rows *[]string, n *TreeNode, depth int, idx *int, highlightI
 		}
 		styled := style.Render(n.Label)
 		if n.Skipped && n.SkipReason != "" {
-			styled = styled + "  " + skipReason.Render("("+n.SkipReason+")")
+			styled = styled + "  " + skipReason.Render(note)
 		}
 		rendered = fmt.Sprintf("%s%s %s", indent, bullet, styled)
 	}
@@ -528,7 +539,7 @@ func appendNodeRows(rows *[]string, n *TreeNode, depth int, idx *int, highlightI
 	*idx++
 	if n.Expanded {
 		for _, c := range n.Children {
-			appendNodeRows(rows, c, depth+1, idx, highlightIdx)
+			appendNodeRows(rows, c, depth+1, idx, highlightIdx, toggleHint)
 		}
 	}
 }

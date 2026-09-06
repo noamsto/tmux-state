@@ -126,7 +126,7 @@ run-shell -b '@BIN@ restore --auto'
 
 const binds = `# Keybindings
 bind   u    run-shell "@BIN@ undo --pop --session='#{session_name}'"
-bind   U    display-popup -E -w 90% -h 85% "@BIN@ pick --kind=close --session='#{session_name}'"
+bind   U    display-popup -E -w 90% -h 85% '@BIN@ pick --kind=close'
 bind   R    display-popup -E -w 90% -h 85% '@BIN@ pick --kind=snapshot'
 bind C-s    run-shell '@BIN@ save --reason=keybinding'
 `

@@ -90,6 +90,9 @@ func (m PickerModel) renderPreview(width int) string {
 	}
 	p, _ := n.Ref.(*snapshot.Pane)
 	if p == nil || p.ScrollbackSHA == "" {
+		if p != nil && m.manifests[m.CurrentEventID()].ScrollbackSkipped {
+			return frame.Render(rowDim.Render("(scrollback skipped — saved within min_save_interval)"))
+		}
 		return frame.Render(rowDim.Render("(no scrollback captured for this pane)"))
 	}
 	sha := p.ScrollbackSHA
@@ -103,6 +106,13 @@ func (m PickerModel) renderPreview(width int) string {
 		}
 		// Not loading yet — PreviewCmd will schedule on next key event.
 		return frame.Render(rowDim.Render("(scrollback pending)"))
+	}
+	if m.paneHintShows() {
+		w, _ := n.Parent.Ref.(*snapshot.Window) // paneHintShows verified the type
+		hint := m.paneContextMap(w, p.ID, innerWidth)
+		sep := rowDim.Render(strings.Repeat("─", innerWidth))
+		sb := previewWindow(string(content), innerWidth, m.paneScrollbackHeight(), m.previewScroll, m.previewScrollX)
+		return frame.Render(hint + "\n" + sep + "\n" + sb)
 	}
 	return frame.Render(previewWindow(string(content), innerWidth, innerHeight, m.previewScroll, m.previewScrollX))
 }
@@ -388,6 +398,77 @@ func countWindows(man snapshot.Manifest) int {
 		n += len(s.Windows)
 	}
 	return n
+}
+
+// paneMapHintHeight is the box-art height of the mini-map shown above a pane's
+// scrollback. panemap needs minMapHeight (6) to draw art rather than a summary.
+const paneMapHintHeight = 7
+
+// paneHintShows reports whether the focused pane's preview leads with a mini-map
+// of its window. It gates on a parsable layout and enough panel height to keep a
+// useful amount of scrollback below the map. renderPreview and the scroll-clamp
+// math both consult it so the visible scrollback height they assume agrees; the
+// preview column is never narrower than the map's minimum, so when it shows the
+// strip is always paneMapHintHeight rows plus one separator.
+func (m PickerModel) paneHintShows() bool {
+	// Snapshot mode only. Close mode renders its own preview and never reaches
+	// the mini-map, but it still carries a treeCursor no key drives — without
+	// this guard a stale cursor landing on a pane node would silently charge
+	// close mode for a strip it does not draw.
+	if m.mode != ModeSnapshot {
+		return false
+	}
+	if m.previewInnerHeight() < paneMapHintHeight+1+6 { // map + separator + scrollback
+		return false
+	}
+	nodes := m.visibleNodes()
+	if m.treeCursor < 0 || m.treeCursor >= len(nodes) {
+		return false
+	}
+	n := nodes[m.treeCursor]
+	if n.Kind != NodePane {
+		return false
+	}
+	w, ok := n.Parent.Ref.(*snapshot.Window)
+	if !ok {
+		return false
+	}
+	_, err := panemap.Parse(w.Layout)
+	return err == nil
+}
+
+// paneScrollbackHeight is the rows the scrollback occupies in the preview: the
+// panel's inner height, less the mini-map strip when paneHintShows.
+func (m PickerModel) paneScrollbackHeight() int {
+	h := m.previewInnerHeight()
+	if m.paneHintShows() {
+		h -= paneMapHintHeight + 1
+	}
+	if h < 1 {
+		h = 1
+	}
+	return h
+}
+
+// paneContextMap draws w's layout with the focused pane (focusedID) marked, for
+// the strip above a pane's scrollback — "you are here" context while reading the
+// output. Callers gate on paneHintShows first.
+func (m PickerModel) paneContextMap(w *snapshot.Window, focusedID string, width int) string {
+	g, err := panemap.Parse(w.Layout)
+	if err != nil {
+		return ""
+	}
+	label := func(idx int) string {
+		p := paneByID(w, idx)
+		if p == nil {
+			return ""
+		}
+		if p.ID == focusedID {
+			return fmt.Sprintf("▸%d %s", p.Index, p.Command)
+		}
+		return fmt.Sprintf("%d %s", p.Index, p.Command)
+	}
+	return panemap.Render(g, width, paneMapHintHeight, label, nil)
 }
 
 // paneByID returns the pane whose tmux id is "%<n>", the handle the layout

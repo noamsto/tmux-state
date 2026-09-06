@@ -98,7 +98,24 @@ func paneLabel(p *snapshot.Pane) string {
 	if cmd == "" {
 		cmd = "(none)"
 	}
-	return fmt.Sprintf("%-7s %s", cmd, cwd)
+	// Lead with the pane index so a tree row matches the numbered box in the map.
+	return fmt.Sprintf("%d %-7s %s", p.Index, cmd, cwd)
+}
+
+// countPanes returns the number of NodePane descendants of n. Only called on
+// a session auto-collapsed by the running-session filter, where every
+// descendant is filtered too — it doesn't account for a subtree with a mix
+// of shown and filtered panes.
+func countPanes(n *TreeNode) int {
+	count := 0
+	for _, c := range n.Children {
+		if c.Kind == NodePane {
+			count++
+		} else {
+			count += countPanes(c)
+		}
+	}
+	return count
 }
 
 // FilterDecorate walks the tree and marks each node Skipped/SkipReason based on
