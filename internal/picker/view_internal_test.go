@@ -1111,6 +1111,26 @@ func TestFitCwd_PrefersAPathBoundary(t *testing.T) {
 	}
 }
 
+// A double-width rune straddling the truncation cut can leave the cut one
+// cell over budget; fitCwd must still land on exactly width cells rather than
+// panicking on a negative strings.Repeat count. Covers cwdColumnWidth's whole
+// production range (8-24) against tails with CJK and emoji runes.
+func TestFitCwd_ExactWidthAcrossWideRunes(t *testing.T) {
+	for _, tail := range []string{
+		"git/日本語プロジェクト/internal",
+		"emoji/📁folder/sub",
+		"noamsto/tmux-remux/internal/picker",
+		"factify/services/document",
+	} {
+		for width := 8; width <= 24; width++ {
+			got := fitCwd(tail, width)
+			if w := lipgloss.Width(got); w != width {
+				t.Errorf("fitCwd(%q, %d) = %q, width %d, want %d", tail, width, got, w, width)
+			}
+		}
+	}
+}
+
 // TestView_CloseListFrameGeometry pins the flat list's frames across a size
 // matrix. lipgloss v2's MaxHeight hard-truncates the rendered line list, so an
 // over-tall body silently loses its closing border rather than overflowing:

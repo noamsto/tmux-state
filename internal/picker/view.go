@@ -1005,7 +1005,14 @@ func fitCwd(tail string, width int) string {
 	if i := strings.IndexByte(cut, '/'); i > 0 && lipgloss.Width(cut[:i]) <= 6 {
 		cut = "…" + cut[i:]
 	}
-	return cut + strings.Repeat(" ", width-lipgloss.Width(cut))
+	// A double-width rune straddling the TruncateLeft cut can leave it one
+	// cell over width; clamp before padding so the Repeat count never goes
+	// negative.
+	cut = ansi.Truncate(cut, width, "")
+	if pad := width - lipgloss.Width(cut); pad > 0 {
+		cut += strings.Repeat(" ", pad)
+	}
+	return cut
 }
 
 // closeRowScopeStyle colours a close row by what it would restore, matching
