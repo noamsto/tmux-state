@@ -11,7 +11,7 @@ import (
 )
 
 func TestParseSessions(t *testing.T) {
-	input := "lazytmux\x1f1745700000\nwork\x1f1745699000\n"
+	input := "lazytmux\x1f1745700000\x1f\nwork\x1f1745699000\x1f\n"
 	got, err := tmux.ParseSessions(input)
 	if err != nil {
 		t.Fatal(err)
@@ -19,6 +19,20 @@ func TestParseSessions(t *testing.T) {
 	want := []tmux.SessionRow{
 		{Name: "lazytmux", LastAttached: 1745700000},
 		{Name: "work", LastAttached: 1745699000},
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("ParseSessions mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestParseSessionsBridgeHost(t *testing.T) {
+	input := "myhost-work\x1f1745700000\x1fmyhost\n"
+	got, err := tmux.ParseSessions(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []tmux.SessionRow{
+		{Name: "myhost-work", LastAttached: 1745700000, BridgeHost: "myhost"},
 	}
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("ParseSessions mismatch (-want +got):\n%s", diff)
@@ -113,7 +127,7 @@ func TestParsePanes(t *testing.T) {
 
 func TestParseSessionsEmptyLastAttached(t *testing.T) {
 	// tmux emits empty session_last_attached for sessions that have never been attached.
-	got, err := tmux.ParseSessions("never-attached\x1f\nlazytmux\x1f1745700000\n")
+	got, err := tmux.ParseSessions("never-attached\x1f\x1f\nlazytmux\x1f1745700000\x1f\n")
 	if err != nil {
 		t.Fatalf("ParseSessions: %v", err)
 	}
