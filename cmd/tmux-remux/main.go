@@ -597,7 +597,7 @@ func (c PickCmd) Run() error {
 		if mode == picker.ModeClose {
 			m.SetCloseContexts(ctxs)
 			m.SetHiddenCount(hidden)
-			m.SetCloseTree(picker.BuildCloseTree(evs, ctxs, currentSession(ctx, t, c.Session), runningSet))
+			m.SetCloseRows(picker.BuildCloseList(evs, ctxs, currentSession(ctx, t, c.Session)))
 		}
 		m.Bootstrap()
 

@@ -19,6 +19,16 @@ import (
 	"github.com/noamsto/tmux-remux/internal/store"
 )
 
+// closePreviewWidth returns the width View hands the close preview: the
+// preview column when it sits beside the list, the whole terminal when the
+// list is too narrow for both and it stacks underneath.
+func closePreviewWidth(m PickerModel) int {
+	if _, _, w := m.paneWidthsThree(); w > 0 {
+		return w
+	}
+	return m.width
+}
+
 func TestLoadScrollbackCmd_ReturnsContent(t *testing.T) {
 	tmp := t.TempDir()
 	sb := scrollback.New(tmp)
@@ -359,7 +369,7 @@ func TestPickerModel_ClosePreviewsClosedPaneScrollback(t *testing.T) {
 	}
 	ev := store.Event{ID: 7, Kind: "pane-died", ManifestJSON: `{"pane_id":"%1"}`}
 
-	// A real close tree, because with one the cursor indexes close-tree rows
+	// A real close list, because in close mode the cursor indexes its rows
 	// rather than the event slice — the path production actually takes.
 	ctxs := map[int64]CloseContext{7: {
 		Label:       "pane",
@@ -368,12 +378,12 @@ func TestPickerModel_ClosePreviewsClosedPaneScrollback(t *testing.T) {
 	}}
 	m := NewPickerModel(ModeClose, []store.Event{ev}, nil, scrollback.New(t.TempDir()))
 	m.SetCloseContexts(ctxs)
-	m.SetCloseTree(BuildCloseTree([]store.Event{ev}, ctxs, "demo", nil))
+	m.SetCloseRows(BuildCloseList([]store.Event{ev}, ctxs, "demo"))
 	m.Bootstrap()
 	m.width, m.height = 130, 20
 	m.scrollbacks[sha] = []byte("step 34: reading files…")
 
-	_, _, previewWidth := m.paneWidthsThree()
+	previewWidth := closePreviewWidth(m)
 	got := m.renderPreview(previewWidth)
 	if !strings.Contains(got, "step 34") {
 		t.Errorf("close-mode preview does not show the pane's scrollback:\n%s", got)
@@ -547,11 +557,11 @@ func TestPickerModel_ClosePreviewShowsOnlyTheDiedPane(t *testing.T) {
 
 	m := NewPickerModel(ModeClose, []store.Event{ev}, nil, nil)
 	m.SetCloseContexts(ctxs)
-	m.SetCloseTree(BuildCloseTree([]store.Event{ev}, ctxs, "demo", nil))
+	m.SetCloseRows(BuildCloseList([]store.Event{ev}, ctxs, "demo"))
 	m.Bootstrap()
 	m.width, m.height = 160, 24
 
-	_, _, previewWidth := m.paneWidthsThree()
+	previewWidth := closePreviewWidth(m)
 	got := stripANSI(m.renderPreview(previewWidth))
 	if !strings.Contains(got, "1 · agent-work") || !strings.Contains(got, "1 of 1") {
 		t.Errorf("the dead pane has no block of its own:\n%s", got)
@@ -599,10 +609,10 @@ func TestPickerModel_DemoKeysEchoesLastKey(t *testing.T) {
 }
 
 // prefix+U used to open on "(press Tab to preview panes)". The preview must be
-// live from the first frame, following the close-tree cursor.
+// live from the first frame, following the close list's cursor.
 func TestRenderPreview_CloseModeNeedsNoTab(t *testing.T) {
 	m := nestedClosePreviewModel(t)
-	_, _, previewW := m.paneWidthsThree()
+	previewW := closePreviewWidth(m)
 	out := m.renderPreview(previewW)
 	if strings.Contains(out, "press Tab") {
 		t.Errorf("close preview still gated behind Tab:\n%s", out)
@@ -615,7 +625,7 @@ func TestRenderPreview_CloseModeNeedsNoTab(t *testing.T) {
 // Moving the close cursor must move the preview with it, without a focus change.
 func TestRenderPreview_CloseModeTracksTheCursor(t *testing.T) {
 	m := nestedClosePreviewModel(t)
-	_, _, previewW := m.paneWidthsThree()
+	previewW := closePreviewWidth(m)
 	first := m.renderPreview(previewW)
 
 	updated, _ := m.Update(tea.KeyPressMsg{Code: 'j'})
@@ -671,7 +681,7 @@ func nestedClosePreviewModel(t *testing.T) PickerModel {
 	}
 	m := NewPickerModel(ModeClose, evs, nil, nil)
 	m.SetCloseContexts(ctxs)
-	m.SetCloseTree(BuildCloseTree(evs, ctxs, "mono", map[string]bool{}))
+	m.SetCloseRows(BuildCloseList(evs, ctxs, "mono"))
 	m.Bootstrap()
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 160, Height: 40})
 	return updated.(PickerModel)
@@ -688,7 +698,7 @@ func TestPickerModel_CloseModeSchedulesScrollbackAtStartup(t *testing.T) {
 	if !m.loadingSHAs[closeScrollbackSHA] {
 		t.Errorf("Init did not mark %q in flight", closeScrollbackSHA)
 	}
-	_, _, previewW := m.paneWidthsThree()
+	previewW := closePreviewWidth(m)
 	if got := m.renderPreview(previewW); !strings.Contains(got, "loading scrollback") {
 		t.Errorf("first frame does not say the scrollback is on its way:\n%s", got)
 	}
@@ -699,7 +709,7 @@ func TestPickerModel_CloseModeSchedulesScrollbackAtStartup(t *testing.T) {
 // content type the moment a load lands.
 func TestRenderPreview_CloseModePendingScrollback(t *testing.T) {
 	m := closeScrollbackModel(t, closeScrollbackSHA)
-	_, _, previewW := m.paneWidthsThree()
+	previewW := closePreviewWidth(m)
 	if got := m.renderPreview(previewW); !strings.Contains(got, "scrollback pending") {
 		t.Errorf("an unscheduled scrollback does not read as pending:\n%s", got)
 	}
@@ -709,7 +719,7 @@ func TestRenderPreview_CloseModePendingScrollback(t *testing.T) {
 // the list cursor, so the key must leave both focus and the panel alone.
 func TestPickerModel_CloseModeTabIsInert(t *testing.T) {
 	m := nestedClosePreviewModel(t)
-	_, _, previewW := m.paneWidthsThree()
+	previewW := closePreviewWidth(m)
 	before := m.renderPreview(previewW)
 
 	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
@@ -732,7 +742,7 @@ func TestPickerModel_CloseModeAltScrollsPreview(t *testing.T) {
 	}
 	m.scrollbacks[closeScrollbackSHA] = []byte(b.String())
 
-	_, _, previewW := m.paneWidthsThree()
+	previewW := closePreviewWidth(m)
 	maxScroll := m.previewMaxScroll(m.previewInnerHeight())
 	if maxScroll == 0 {
 		t.Fatal("fixture scrollback is not taller than the preview panel")
@@ -797,7 +807,7 @@ func closeScrollbackModel(t *testing.T, sha string) PickerModel {
 	}}
 	m := NewPickerModel(ModeClose, []store.Event{ev}, nil, scrollback.New(t.TempDir()))
 	m.SetCloseContexts(ctxs)
-	m.SetCloseTree(BuildCloseTree([]store.Event{ev}, ctxs, "demo", nil))
+	m.SetCloseRows(BuildCloseList([]store.Event{ev}, ctxs, "demo"))
 	m.Bootstrap()
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 160, Height: 20})
 	return updated.(PickerModel)
@@ -849,13 +859,10 @@ func TestClosePreviewWindow_MultiSessionSubManifestDoesNotFallBack(t *testing.T)
 	}
 }
 
-// Left can collapse a window row and land the cursor on an *event* row above
-// it — not just on a pane row it collapsed from. Two pane closes in two
-// windows of one other-session group produce that shape: collapsing the
-// second window's header walks the cursor up past its own pure-header row to
-// the first window's pane close, which must still reset the preview scroll
-// and schedule that pane's scrollback.
-func TestPickerModel_CloseModeLeftLandsOnEventRowAboveCollapsedWindow(t *testing.T) {
+// Moving the cursor to another close must reset the preview scroll and
+// schedule the scrollback of the pane it lands on — otherwise the new close's
+// block opens mid-buffer, or hangs on "(loading scrollback…)" forever.
+func TestPickerModel_CloseModeCursorMoveResetsScrollAndLoads(t *testing.T) {
 	man := snapshot.Manifest{Sessions: []snapshot.Session{{
 		Name: "lazytmux",
 		Windows: []snapshot.Window{
@@ -873,29 +880,31 @@ func TestPickerModel_CloseModeLeftLandsOnEventRowAboveCollapsedWindow(t *testing
 	}
 	m := NewPickerModel(ModeClose, evs, nil, scrollback.New(t.TempDir()))
 	m.SetCloseContexts(ctxs)
-	m.SetCloseTree(BuildCloseTree(evs, ctxs, "mono", nil))
+	m.SetCloseRows(BuildCloseList(evs, ctxs, "mono"))
 	m.Bootstrap()
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 160, Height: 40})
 	m = updated.(PickerModel)
 
-	vis := m.CloseVisible()
-	if len(vis) != 6 {
-		t.Fatalf("flattened close tree has %d rows, want 6: %+v", len(vis), vis)
+	// Row 0 is the OTHER SESSIONS header; the cursor opens on alpha's close.
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	m = updated.(PickerModel)
+	if m.cursor != 2 {
+		t.Fatalf("cursor landed on %d, want 2 (beta's pane %%2 close)", m.cursor)
 	}
-	m.cursor = 5 // beta's pane %2 close
 	m.previewScroll = 3
+	delete(m.loadingSHAs, "aaa") // scheduled by Bootstrap; watch this move re-schedule it
 
-	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyLeft})
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyUp})
 	m = updated.(PickerModel)
 
-	if m.cursor != 3 {
-		t.Fatalf("cursor landed on %d, want 3 (alpha's pane %%1 close)", m.cursor)
+	if m.cursor != 1 {
+		t.Fatalf("cursor landed on %d, want 1 (alpha's pane %%1 close)", m.cursor)
 	}
 	if m.previewScroll != 0 {
-		t.Errorf("previewScroll = %d, want 0 after Left", m.previewScroll)
+		t.Errorf("previewScroll = %d, want 0 after moving to another close", m.previewScroll)
 	}
 	if !m.loadingSHAs["aaa"] {
-		t.Error("Left did not schedule the scrollback load for the event row it landed on")
+		t.Error("the move did not schedule the scrollback load for the close it landed on")
 	}
 }
 
@@ -905,8 +914,8 @@ func TestPickerModel_CloseModeLeftLandsOnEventRowAboveCollapsedWindow(t *testing
 // close now produces, and "missing" strips the session's windows so
 // closePreviewWindow finds nothing and the body takes its "nothing captured"
 // branch. The session itself is kept (a zero-session sub-manifest makes
-// BuildCloseTree hide the row entirely, per closetree.go's "nothing to
-// restore" rule — a different case than this one). Every pane carries far more
+// BuildCloseList drop the row entirely, per its "nothing to restore" rule —
+// a different case than this one). Every pane carries far more
 // scrollback than any frame here can hold, and the session/window name is long
 // enough to need truncation, so both axes of the box math are under load.
 func closePreviewFrameFixture(t *testing.T, scope string) PickerModel {
@@ -947,7 +956,7 @@ func closePreviewFrameFixture(t *testing.T, scope string) PickerModel {
 	}}
 	m := NewPickerModel(ModeClose, []store.Event{ev}, nil, nil)
 	m.SetCloseContexts(ctxs)
-	m.SetCloseTree(BuildCloseTree([]store.Event{ev}, ctxs, "demo-"+longName, nil))
+	m.SetCloseRows(BuildCloseList([]store.Event{ev}, ctxs, "demo-"+longName))
 	m.Bootstrap()
 	var b strings.Builder
 	for i := 1; i <= 200; i++ {
@@ -1165,7 +1174,7 @@ func closeStackFixture(t *testing.T, cmds []string, bodies []string) PickerModel
 	}}
 	m := NewPickerModel(ModeClose, []store.Event{ev}, nil, nil)
 	m.SetCloseContexts(ctxs)
-	m.SetCloseTree(BuildCloseTree([]store.Event{ev}, ctxs, "halo-nix-amd-ai", nil))
+	m.SetCloseRows(BuildCloseList([]store.Event{ev}, ctxs, "halo-nix-amd-ai"))
 	m.Bootstrap()
 	m.width, m.height = 120, 30
 	for i, b := range bodies {
@@ -1313,6 +1322,23 @@ func TestClosePreviewBody_NeverExceedsItsBudget(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// A pane whose scrollback was never captured has no hash to load. Scheduling
+// its empty string would hand loadScrollbackCmd a path that cannot exist and
+// stamp an error against "" that every later empty-SHA pane would inherit.
+func TestPickerModel_CloseModeSkipsPanesWithNoScrollback(t *testing.T) {
+	m := closeStackFixture(t, []string{"claude", "fish"}, []string{"alpha", ""})
+	if got := m.closeCursorSHAs(); len(got) != 1 || got[0] != "sha0" {
+		t.Fatalf("closeCursorSHAs = %q, want just the captured pane's hash", got)
+	}
+
+	m.scrollbackStore = scrollback.New(t.TempDir())
+	delete(m.scrollbacks, "sha0")
+	m.PreviewCmd()
+	if m.loadingSHAs[""] {
+		t.Error("PreviewCmd scheduled a load for the pane with no scrollback")
 	}
 }
 

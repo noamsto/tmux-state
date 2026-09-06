@@ -58,7 +58,7 @@ type scrollbackLoadedMsg struct {
 // renderPreview renders the right-most preview pane. width is the cell budget
 // (including the rounded border). Height comes from m.height.
 func (m PickerModel) renderPreview(width int) string {
-	if m.hasCloseUI() {
+	if m.mode == ModeClose {
 		return m.renderClosePreview(width)
 	}
 	frameHeight := m.panelFrameHeight()
@@ -141,28 +141,14 @@ func (m PickerModel) renderClosePreview(width int) string {
 	}
 	frame := previewFrame.Width(width).Height(frameHeight).MaxHeight(frameHeight)
 
-	var cc CloseContext
-	var ts int64
-	if m.usesCloseRows() {
-		if m.cursor < 0 || m.cursor >= len(m.closeRows) {
-			return frame.Render(rowDim.Render("(nothing selected)"))
-		}
-		r := m.closeRows[m.cursor]
-		if !r.Selectable() {
-			return frame.Render(rowDim.Render("(a section — ↑↓ to reach a close)"))
-		}
-		cc, ts = m.CloseContextFor(r.EventID), r.Ts
-	} else {
-		vis := m.CloseVisible()
-		if m.cursor < 0 || m.cursor >= len(vis) {
-			return frame.Render(rowDim.Render("(nothing selected)"))
-		}
-		n := vis[m.cursor]
-		if n.EventID == 0 {
-			return frame.Render(rowDim.Render("(a section — ↑↓ to reach a close)"))
-		}
-		cc, ts = m.CloseContextFor(n.EventID), n.Ts
+	if m.cursor < 0 || m.cursor >= len(m.closeRows) {
+		return frame.Render(rowDim.Render("(nothing selected)"))
 	}
+	r := m.closeRows[m.cursor]
+	if !r.Selectable() {
+		return frame.Render(rowDim.Render("(a section — ↑↓ to reach a close)"))
+	}
+	cc, ts := m.CloseContextFor(r.EventID), r.Ts
 
 	// A lipgloss frame pads short content but does not clip overflow — once the
 	// body has more lines than fit, MaxHeight hard-truncates the line list,
@@ -415,7 +401,7 @@ func (m PickerModel) previewInnerHeight() int {
 // previewMaxScroll returns the largest valid m.previewScroll for the current
 // pane's scrollback. Used to clamp Alt+K scroll-up at the top of the buffer.
 func (m PickerModel) previewMaxScroll(innerHeight int) int {
-	if m.hasCloseUI() {
+	if m.mode == ModeClose {
 		return m.closeMaxScroll()
 	}
 	sha := m.previewSHA()
@@ -475,8 +461,9 @@ func loadScrollbackCmd(sb *scrollback.Store, sha string) tea.Cmd {
 	}
 }
 
-// renderWindowMap draws w's pane layout, titled with the window. Returns "" when
-// the layout is absent or unparsable so the caller can fall back to its hint.
+// renderWindowMap draws w's pane layout, titled with the window, for snapshot
+// mode's window nodes. Returns "" when the layout is absent or unparsable so
+// the caller can fall back to its hint.
 func (m PickerModel) renderWindowMap(w *snapshot.Window, innerWidth, innerHeight int) string {
 	g, err := panemap.Parse(w.Layout)
 	if err != nil {
@@ -493,19 +480,9 @@ func (m PickerModel) renderWindowMap(w *snapshot.Window, innerWidth, innerHeight
 		}
 		return ""
 	}
-	place := m.CloseContextFor(m.CurrentEventID()).Placement
-	marked := func(idx int) bool {
-		switch place.Scope {
-		case "":
-			return false // snapshot mode: nothing died
-		case "pane":
-			p := paneByID(w, idx)
-			return p != nil && p.ID == place.PaneID
-		default:
-			return true // window or session close: all of it came down
-		}
-	}
-	art := panemap.Render(g, innerWidth, innerHeight-1, label, marked)
+	// No pane is marked: renderPreview reaches this only in snapshot mode,
+	// where nothing died.
+	art := panemap.Render(g, innerWidth, innerHeight-1, label, nil)
 	return rowDim.Render(ansi.Truncate(title, innerWidth, "…")) + "\n" + art
 }
 

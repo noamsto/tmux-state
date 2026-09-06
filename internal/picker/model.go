@@ -72,15 +72,9 @@ type PickerModel struct {
 	// and the sub-manifest of what was lost. Populated by SetCloseContexts
 	// before Bootstrap. Keys are store.Event IDs. Empty in snapshot mode.
 	closeContexts map[int64]CloseContext
-	// closeTree is the grouped close hierarchy rendered in close mode. When
-	// set, m.cursor indexes FlattenClose(closeTree) rather than m.events.
-	closeTree *CloseNode
-	// closeRows is #104's flat, newest-first replacement for closeTree. When
-	// set, m.cursor indexes closeRows and takes priority over closeTree — the
-	// two are never both meaningful at once, but closeRows wins so callers can
-	// migrate one setter at a time. Nil until SetCloseRows is called; View and
-	// main.go don't populate it yet (that's #104's later tasks), so today it's
-	// only reachable in tests.
+	// closeRows is the flat, newest-first close list rendered in close mode.
+	// When the mode is ModeClose, m.cursor indexes closeRows rather than
+	// m.events. Empty when nothing recoverable was closed.
 	closeRows []CloseRow
 	// hiddenCount is the number of unrecoverable close events the caller
 	// filtered out before constructing the model. Rendered as a footer line so
@@ -191,9 +185,9 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // visibleNodes flattens the current tree honoring Expanded.
 func (m PickerModel) visibleNodes() []*TreeNode {
-	// Keyed off CurrentEventID, not m.events[m.cursor]: with a close tree the
-	// cursor indexes close-tree rows, so indexing the event slice with it looks
-	// up the wrong tree (or none) and the preview finds no pane to show.
+	// Keyed off CurrentEventID, not m.events[m.cursor]: in close mode the
+	// cursor indexes closeRows, so indexing the event slice with it looks up
+	// the wrong tree (or none) and the preview finds no pane to show.
 	id := m.CurrentEventID()
 	if id == 0 {
 		return nil
@@ -331,11 +325,14 @@ func (m PickerModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// recoverable row. Handlers that want to surface a fresh note set it
 	// after this clear.
 	m.footerNote = ""
-	// Close mode with the flat row list (#104): the cursor walks CloseRows,
-	// skipping section headers. There's no hierarchy to expand or collapse,
-	// so Left/Right fall through unhandled — the flat list's whole nav story
-	// is Up/Down/Enter.
-	if m.mode == ModeClose && len(m.closeRows) > 0 && m.focus == focusList {
+	// Close mode: the cursor walks closeRows, skipping section headers. There
+	// is no hierarchy to expand or collapse, so Left/Right fall through
+	// unhandled — Up/Down/Enter is the whole nav story. The branch claims
+	// every close-mode Up/Down/Enter even with no rows to walk, so an empty
+	// list can never fall through to the snapshot handler below and start
+	// paging m.events, which in close mode holds the unrecoverable events the
+	// list deliberately does not show.
+	if m.mode == ModeClose {
 		switch {
 		case key.Matches(msg, m.keys.Up):
 			if idx := m.nextCloseRowIdx(m.cursor, -1); idx >= 0 {
@@ -363,66 +360,6 @@ func (m PickerModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				m.selectedID = id
 				return m, tea.Quit
 			}
-			return m, nil
-		}
-	} else if m.mode == ModeClose && m.closeTree != nil && m.focus == focusList {
-		vis := m.CloseVisible()
-		switch {
-		case key.Matches(msg, m.keys.Up):
-			if idx := m.nextCloseIdx(m.cursor, -1); idx >= 0 {
-				m.cursor = idx
-				m.previewScroll = 0
-				m.previewScrollX = 0
-				(&m).ensureManifest()
-			}
-			return m, (&m).PreviewCmd()
-		case key.Matches(msg, m.keys.Down):
-			if idx := m.nextCloseIdx(m.cursor, +1); idx >= 0 {
-				m.cursor = idx
-				m.previewScroll = 0
-				m.previewScrollX = 0
-				(&m).ensureManifest()
-			}
-			return m, (&m).PreviewCmd()
-		case key.Matches(msg, m.keys.Right):
-			if m.cursor >= 0 && m.cursor < len(vis) {
-				if n := vis[m.cursor]; len(n.Children) > 0 {
-					n.Expanded = true
-				}
-			}
-			return m, nil
-		case key.Matches(msg, m.keys.Left):
-			if m.cursor >= 0 && m.cursor < len(vis) {
-				n := vis[m.cursor]
-				if n.Expanded && len(n.Children) > 0 {
-					n.Expanded = false
-					return m, nil
-				}
-				// Collapse the nearest collapsible ancestor below the
-				// synthetic root, then land on a row the cursor may occupy.
-				for a := n.Parent; a != nil && a.Parent != nil; a = a.Parent {
-					if !a.Expanded || len(a.Children) == 0 {
-						continue
-					}
-					a.Expanded = false
-					next := m.CloseVisible()
-					m.cursor = closeNavAt(next, closeIndexOf(next, a))
-					m.previewScroll = 0
-					m.previewScrollX = 0
-					(&m).ensureManifest()
-					return m, (&m).PreviewCmd()
-				}
-			}
-			return m, nil
-		case key.Matches(msg, m.keys.Enter):
-			if m.cursor < 0 || m.cursor >= len(vis) {
-				return m, nil
-			}
-			if id := vis[m.cursor].EventID; id != 0 {
-				m.selectedID = id
-				return m, tea.Quit
-			}
-			m.footerNote = "(group — nothing to restore here)"
 			return m, nil
 		}
 	}
@@ -602,12 +539,7 @@ func (m *PickerModel) redecorate() {
 // render. Idempotent.
 func (m *PickerModel) Bootstrap() {
 	if m.mode == ModeClose {
-		switch {
-		case len(m.closeRows) > 0:
-			m.cursor = firstSelectableCloseRow(m.closeRows)
-		case m.closeTree != nil:
-			m.cursor = m.firstCloseTarget()
-		}
+		m.cursor = firstSelectableCloseRow(m.closeRows)
 	}
 	m.ensureManifest()
 }
@@ -673,19 +605,8 @@ func (m *PickerModel) SetHiddenCount(n int) {
 	m.hiddenCount = n
 }
 
-// SetCloseTree attaches the grouped close hierarchy. Call between
+// SetCloseRows attaches the flat, newest-first close list. Call between
 // NewPickerModel and Bootstrap. Close mode only.
-//
-// Expansion state is entirely BuildCloseTree's decision — including the
-// default for everything nested below the two group headers — so this just
-// stores the result.
-func (m *PickerModel) SetCloseTree(root *CloseNode) {
-	m.closeTree = root
-}
-
-// SetCloseRows attaches the flat, newest-first close list (#104's replacement
-// for the grouped tree). Call between NewPickerModel and Bootstrap. Close
-// mode only. Takes priority over a tree set via SetCloseTree.
 func (m *PickerModel) SetCloseRows(rows []CloseRow) {
 	m.closeRows = rows
 }
@@ -694,110 +615,23 @@ func (m *PickerModel) SetCloseRows(rows []CloseRow) {
 // cursor through key handling.
 func (m *PickerModel) SetCursor(i int) { m.cursor = i }
 
-// CloseVisible returns the currently visible close-tree rows.
-func (m PickerModel) CloseVisible() []*CloseNode { return FlattenClose(m.closeTree) }
-
-// usesCloseRows reports whether close mode is driven by the flat row list
-// rather than the tree — the same precedence Update and CurrentEventID apply,
-// so every layer agrees on which model is live while main.go still sets the
-// tree. Collapses to `m.mode == ModeClose` once the tree goes.
-func (m PickerModel) usesCloseRows() bool {
-	return m.mode == ModeClose && len(m.closeRows) > 0
-}
-
-// hasCloseUI reports whether close mode has either model populated, and so
-// draws the close preview rather than snapshot mode's.
-func (m PickerModel) hasCloseUI() bool {
-	return m.mode == ModeClose && (len(m.closeRows) > 0 || m.closeTree != nil)
-}
-
-// CurrentEventID returns the event id under the cursor, or 0 when the cursor is
-// on a grouping header or there is nothing to point at.
+// CurrentEventID returns the event id under the cursor, or 0 when the cursor
+// is on a section header or there is nothing to point at.
 func (m PickerModel) CurrentEventID() int64 {
-	if len(m.closeRows) > 0 {
+	if m.mode == ModeClose {
 		if m.cursor < 0 || m.cursor >= len(m.closeRows) {
 			return 0
 		}
 		return m.closeRows[m.cursor].EventID
 	}
-	if m.closeTree == nil {
-		if m.cursor < 0 || m.cursor >= len(m.events) {
-			return 0
-		}
-		return m.events[m.cursor].ID
-	}
-	vis := m.CloseVisible()
-	if m.cursor < 0 || m.cursor >= len(vis) {
+	if m.cursor < 0 || m.cursor >= len(m.events) {
 		return 0
 	}
-	return vis[m.cursor].EventID
-}
-
-// isCloseNavTarget reports whether the cursor may land on n: an event row
-// (restorable) or one of the two group headers (so a section can be
-// collapsed). Scaffolding — the nodes that exist only to parent something
-// restorable — is never a stop: Enter would only refuse it.
-func isCloseNavTarget(n *CloseNode) bool {
-	return n.EventID != 0 || IsCloseGroup(n)
-}
-
-// nextCloseIdx walks from start in dir (+1/-1) to the next navigable row, or
-// -1 when there is none that way.
-func (m PickerModel) nextCloseIdx(start, dir int) int {
-	vis := m.CloseVisible()
-	for i := start + dir; i >= 0 && i < len(vis); i += dir {
-		if isCloseNavTarget(vis[i]) {
-			return i
-		}
-	}
-	return -1
-}
-
-// firstCloseTarget returns the first selectable event row — the newest close,
-// since the tree sorts newest-first — skipping the leading group header. This
-// deliberately differs from isCloseNavTarget: Up/Down may stop on a header to
-// collapse or expand it, but the initial cursor should land on something
-// restorable, not on the header that always occupies row 0. Falls back to 0
-// when the tree has no selectable row at all.
-func (m PickerModel) firstCloseTarget() int {
-	for i, n := range m.CloseVisible() {
-		if n.EventID != 0 {
-			return i
-		}
-	}
-	return 0
-}
-
-// closeIndexOf returns the position of target in vis, or 0 when absent.
-func closeIndexOf(vis []*CloseNode, target *CloseNode) int {
-	for i, n := range vis {
-		if n == target {
-			return i
-		}
-	}
-	return 0
-}
-
-// closeNavAt returns idx when vis[idx] is a cursor stop, else the nearest stop
-// above it. Collapsing an ancestor leaves the cursor pointing at a row it may
-// no longer land on; walking up always terminates, since row 0 is a group
-// header.
-func closeNavAt(vis []*CloseNode, idx int) int {
-	if idx >= len(vis) {
-		idx = len(vis) - 1
-	}
-	for i := idx; i >= 0; i-- {
-		if isCloseNavTarget(vis[i]) {
-			return i
-		}
-	}
-	return 0
+	return m.events[m.cursor].ID
 }
 
 // nextCloseRowIdx walks from start in dir (+1/-1) over m.closeRows to the
-// next selectable row, or -1 when there is none that way. The flat list has
-// no hierarchy to expand or collapse, so unlike nextCloseIdx this is the
-// entire close-mode nav story: no ancestor walk, no group-header stop.
+// next selectable row, or -1 when there is none that way.
 func (m PickerModel) nextCloseRowIdx(start, dir int) int {
 	for i := start + dir; i >= 0 && i < len(m.closeRows); i += dir {
 		if m.closeRows[i].Selectable() {
@@ -809,7 +643,9 @@ func (m PickerModel) nextCloseRowIdx(start, dir int) int {
 
 // firstSelectableCloseRow returns the index of the first selectable row in
 // rows — the newest close, since BuildCloseList sorts each section
-// newest-first — or 0 when rows has no selectable row at all.
+// newest-first — or 0 when rows has no selectable row at all (an empty list
+// included, where 0 is out of range and every reader treats it as nothing
+// selected).
 func firstSelectableCloseRow(rows []CloseRow) int {
 	for i, r := range rows {
 		if r.Selectable() {
@@ -897,9 +733,7 @@ func (m PickerModel) previewSHA() string {
 }
 
 // closeCursorContext resolves the close context the cursor sits on, or the
-// zero value when it sits on a section header or out of range. Routes
-// through CurrentEventID, which already knows whether the cursor indexes
-// closeRows or the tree.
+// zero value when it sits on a section header or out of range.
 func (m PickerModel) closeCursorContext() CloseContext {
 	return m.CloseContextFor(m.CurrentEventID())
 }

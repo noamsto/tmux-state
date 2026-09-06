@@ -64,26 +64,21 @@ Sleep 400ms
 Type "x"
 Sleep 2500ms
 
-# prefix+U lists what was closed. Its panes come out of the snapshot the close
-# was diffed against, so they preview the same way.
+# prefix+U lists what was closed: one flat row per close, newest first, under
+# a heading for this session. There is no tree to walk and no Tab to press —
+# the preview under it is already showing the scrollback the closed pane had on
+# screen, read out of the snapshot the close was diffed against.
 Ctrl+b
 Sleep 400ms
 Type "U"
-Sleep 2200ms
+Sleep 4s
 
-Tab
-Sleep 1000ms
-Type "d"
-Sleep 1200ms
-
-# j onto the window: the map draws the pane that died in a dashed border.
-Type "j"
-Sleep 3500ms
-
-# l into the panes, j onto the closed agent's pane and its scrollback.
-Type "l"
-Sleep 1200ms
-Type "j"
+# Alt+k scrolls back through that output without leaving the row.
+Alt+k
+Sleep 700ms
+Alt+k
+Sleep 700ms
+Alt+k
 Sleep 3s
 
 Hide

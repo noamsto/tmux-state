@@ -7,6 +7,18 @@ import (
 	"github.com/noamsto/tmux-remux/internal/store"
 )
 
+// ClosePlacement locates a close event in the tmux hierarchy. Filled by the
+// caller from the resolved closeevent.ClosedItem plus the event's own stored
+// session name.
+type ClosePlacement struct {
+	Session     string
+	WindowIndex int
+	WindowName  string
+	Scope       string // "session" | "window" | "pane"
+	PaneCount   int    // panes in the closed window; 0 for other scopes
+	PaneID      string // tmux id of the lost pane; empty unless Scope == "pane"
+}
+
 // CloseRowKind identifies what a CloseRow represents in the flat list.
 type CloseRowKind int
 
@@ -94,9 +106,8 @@ type closeGroup struct {
 // its own session-scope closes — see below) then OTHER SESSIONS. Each
 // section header is emitted only when it has at least one close under it.
 //
-// Events with an empty SubManifest.Sessions are excluded, exactly as
-// BuildCloseTree does today — the caller counts them as hidden rather than
-// listing a dead row.
+// Events with an empty SubManifest.Sessions are excluded — the caller counts
+// them as hidden rather than listing a dead row.
 //
 // evs is expected newest-first (store.ListEvents orders by ts DESC), but the
 // result does not depend on that — every section is sorted by Ts at the end.
@@ -116,7 +127,7 @@ func BuildCloseList(evs []store.Event, ctxs map[int64]CloseContext, current stri
 			name = closeevent.UnknownSession
 		}
 		// A session close means that session is not the one we are sitting
-		// in, so it always belongs to OTHER SESSIONS — matches BuildCloseTree.
+		// in, so it always belongs to OTHER SESSIONS.
 		mine := current != "" && name == current && p.Scope != "session"
 
 		cmd, cwd := closedPaneInfo(cc)
