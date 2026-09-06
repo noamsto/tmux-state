@@ -202,7 +202,11 @@ func (m PickerModel) closePreviewBody(cc CloseContext, innerWidth, height int) [
 	if w == nil || len(w.Panes) == 0 {
 		return []string{rowDim.Render(ansi.Truncate("(nothing captured for this close)", innerWidth, "…"))}
 	}
-	heights := closeBlockHeights(len(w.Panes), height)
+	fixed := make([]bool, len(w.Panes))
+	for i, p := range w.Panes {
+		fixed[i] = m.closePaneIsFixed(p)
+	}
+	heights := closeBlockHeights(fixed, height)
 	if len(heights) == 0 {
 		// One row left: a label bar alone still says whose output is missing.
 		return []string{closePaneLabel(w.Panes[0], 0, len(w.Panes), innerWidth)}
@@ -214,24 +218,59 @@ func (m PickerModel) closePreviewBody(cc CloseContext, innerWidth, height int) [
 	return out
 }
 
+// closePaneIsFixed reports whether a pane's block renders a single fixed
+// line — no capture, a load error, or a scrollback still in flight — rather
+// than real, possibly multi-line scrollback. closeBlockHeights uses this to
+// give a fixed block only the one row its note needs, instead of a share of
+// the panel it has nothing to fill: the freed room goes to blocks that do.
+func (m PickerModel) closePaneIsFixed(p snapshot.Pane) bool {
+	sha := p.ScrollbackSHA
+	if sha == "" || m.scrollbackErrors[sha] != nil {
+		return true
+	}
+	_, loaded := m.scrollbacks[sha]
+	return !loaded
+}
+
 // closeBlockHeights divides body rows between the panes a close took down,
-// giving every block a label bar plus at least one content row. Panes past
-// what fits get no block — the label bar's "k of n" marker is what says the
-// list is longer than the panel.
-func closeBlockHeights(panes, body int) []int {
-	blocks := panes
+// giving every block a label bar plus at least one content row. A fixed
+// block (see closePaneIsFixed) gets exactly that minimum; whatever body rows
+// remain split evenly across the blocks with real scrollback to show, since
+// only those can use the room. Panes past what fits get no block at all —
+// the last shown label bar's "k of n" marker is what says the list runs
+// longer than the panel.
+func closeBlockHeights(fixed []bool, body int) []int {
+	blocks := len(fixed)
 	if fits := body / 2; blocks > fits {
 		blocks = fits
 	}
 	if blocks < 1 {
 		return nil
 	}
-	base, extra := body/blocks, body%blocks
+	fixed = fixed[:blocks]
+
 	out := make([]int, blocks)
-	for i := range out {
+	remaining, flexible := body, 0
+	for i, f := range fixed {
+		if f {
+			out[i] = 2
+			remaining -= 2
+			continue
+		}
+		flexible++
+	}
+	if flexible == 0 {
+		return out
+	}
+	base, extra := remaining/flexible, remaining%flexible
+	for i, f := range fixed {
+		if f {
+			continue
+		}
 		out[i] = base
-		if i < extra {
+		if extra > 0 {
 			out[i]++
+			extra--
 		}
 	}
 	return out
@@ -429,8 +468,12 @@ func (m PickerModel) closeMaxScroll() int {
 	if w == nil {
 		return 0
 	}
+	fixed := make([]bool, len(w.Panes))
+	for i, p := range w.Panes {
+		fixed[i] = m.closePaneIsFixed(p)
+	}
 	worst := 0
-	for i, h := range closeBlockHeights(len(w.Panes), m.previewInnerHeight()-closeHeaderLines) {
+	for i, h := range closeBlockHeights(fixed, m.previewInnerHeight()-closeHeaderLines) {
 		content, ok := m.scrollbacks[w.Panes[i].ScrollbackSHA]
 		if !ok {
 			continue

@@ -1014,6 +1014,38 @@ func TestRenderClosePreview_NeverOverflowsFrame(t *testing.T) {
 	}
 }
 
+// TestRenderClosePreview_NeverOverflowsFrameWithAFixedBlock guards the same
+// frame-closing invariant as TestRenderClosePreview_NeverOverflowsFrame, for
+// the path that fixture can't reach: one pane has no scrollback at all, so
+// its block is fixed at label-plus-one-row and the other pane's block absorbs
+// the rest. That reshuffle happens on every resize, so the corners have to
+// survive it at every size just as much as the always-full case does.
+func TestRenderClosePreview_NeverOverflowsFrameWithAFixedBlock(t *testing.T) {
+	applyTheme(NewTheme())
+	sizes := []struct{ w, h int }{
+		{90, 6}, {90, 7}, {90, 8}, {90, 10}, {90, 12}, {90, 30},
+		{40, 20}, {160, 30},
+	}
+	m := closePreviewFrameFixture(t, "window")
+	m.closeContexts[1].SubManifest.Sessions[0].Windows[0].Panes[1].ScrollbackSHA = ""
+	for _, sz := range sizes {
+		m.width, m.height = sz.w, sz.h
+		out := m.renderClosePreview(sz.w)
+		wantH := m.panelFrameHeight()
+		if got := lipgloss.Height(out); got != wantH {
+			t.Errorf("w=%d h=%d: rendered height=%d, want %d\n%s", sz.w, sz.h, got, wantH, out)
+		}
+		if got := lipgloss.Width(out); got != sz.w {
+			t.Errorf("w=%d h=%d: rendered width=%d, want %d", sz.w, sz.h, got, sz.w)
+		}
+		rows := strings.Split(out, "\n")
+		last := rows[len(rows)-1]
+		if !strings.ContainsRune(last, '╰') || !strings.ContainsRune(last, '╯') {
+			t.Errorf("w=%d h=%d: frame did not close, last row is %q\n%s", sz.w, sz.h, last, out)
+		}
+	}
+}
+
 // closePreviewWideRuneFixture is closePreviewFrameFixture's "window" scope
 // with scrollback stuffed with CJK and emoji runes in place of plain ASCII —
 // a stand-in for a real editor/agent pane, and the shape previewWindow's
@@ -1269,6 +1301,93 @@ func TestRenderClosePreview_PaneWithoutScrollbackSaysSo(t *testing.T) {
 	}
 	if note != label+1 {
 		t.Errorf("the note is at row %d, want directly under the label at %d:\n%s", note, label, got)
+	}
+}
+
+// A pane with no captured scrollback gets a block just tall enough for its
+// note — one label row, one content row — not a share of the whole panel.
+// The rail must not run empty down the rows that frees up.
+func TestRenderClosePreview_NoScrollbackBlockDoesNotTrailARail(t *testing.T) {
+	m := closeStackFixture(t, []string{"claude"}, []string{""})
+	got := stripANSI(m.renderClosePreview(120))
+	lines := strings.Split(got, "\n")
+	note := indexOfLine(lines, "no scrollback captured")
+	if note < 0 {
+		t.Fatalf("block does not report its missing scrollback:\n%s", got)
+	}
+	// lipgloss pads the frame's leftover height with blank rows, which is
+	// fine — the defect was a rail glyph drawn through them.
+	for i, l := range lines[note+1:] {
+		if strings.ContainsRune(l, '▌') {
+			t.Errorf("rail glyph on row %d, past the note's only content row:\n%s", note+1+i, got)
+		}
+	}
+}
+
+// A close with one pane that has scrollback and one that doesn't gives nearly
+// all the body to the one with content: the fixed block only needs its note,
+// so the freed rows go to the block that can use them.
+func TestRenderClosePreview_MixedPanesGiveRoomToTheOneWithContent(t *testing.T) {
+	var b strings.Builder
+	for i := 1; i <= 60; i++ {
+		fmt.Fprintf(&b, "line %d\n", i)
+	}
+	m := closeStackFixture(t, []string{"claude", "fish"}, []string{b.String(), ""})
+	got := stripANSI(m.renderClosePreview(120))
+	if !strings.Contains(got, "line 60") {
+		t.Errorf("pane with scrollback does not show its tail:\n%s", got)
+	}
+	lines := strings.Split(got, "\n")
+	note := indexOfLine(lines, "no scrollback captured")
+	if note < 0 {
+		t.Fatalf("second block does not report its missing scrollback:\n%s", got)
+	}
+	if !strings.ContainsRune(lines[note+1], '╰') {
+		t.Errorf("the note is not the fixed block's only content row, want the border directly under it:\n%s", got)
+	}
+	// The first block got everything else: header (2) + its own label (1) +
+	// the second block's label and note (2) + the border (1) leave the rest
+	// for its content.
+	wantFirstBlockContent := m.previewInnerHeight() - 3 - 2
+	if !strings.Contains(got, fmt.Sprintf("line %d", 60-wantFirstBlockContent+1)) {
+		t.Errorf("the pane with content does not fill the room the fixed block freed (want %d content rows):\n%s", wantFirstBlockContent, got)
+	}
+}
+
+// closeBlockHeights is the core of the stacked layout's budget math: a fixed
+// block (no scrollback, an error, still loading) gets exactly its label-plus-
+// one-row minimum, and whatever remains splits evenly across the blocks that
+// have real content to show — falling back to an even split when every block
+// is flexible, same as before fixed blocks existed.
+func TestCloseBlockHeights(t *testing.T) {
+	tests := []struct {
+		name  string
+		fixed []bool
+		body  int
+		want  []int
+	}{
+		{"single fixed pane keeps the rest of the panel blank", []bool{true}, 40, []int{2}},
+		{"single flexible pane fills the whole budget", []bool{false}, 40, []int{40}},
+		{"a fixed pane leaves the rest for its flexible neighbor", []bool{false, true}, 40, []int{38, 2}},
+		{"order does not matter, the fixed pane still gets the minimum", []bool{true, false}, 40, []int{2, 38}},
+		{"two flexible panes split evenly", []bool{false, false}, 10, []int{5, 5}},
+		{"an odd remainder goes to the earlier flexible pane", []bool{false, false}, 11, []int{6, 5}},
+		{"too little room drops the pane past what fits", []bool{false, false, false}, 5, []int{3, 2}},
+		{"no room at all yields no blocks", []bool{true}, 1, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := closeBlockHeights(tt.fixed, tt.body)
+			if len(got) != len(tt.want) {
+				t.Fatalf("closeBlockHeights(%v, %d) = %v, want %v", tt.fixed, tt.body, got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("closeBlockHeights(%v, %d) = %v, want %v", tt.fixed, tt.body, got, tt.want)
+					break
+				}
+			}
+		})
 	}
 }
 
