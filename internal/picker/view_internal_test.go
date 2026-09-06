@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"charm.land/bubbles/v2/help"
 	"charm.land/lipgloss/v2"
 	"github.com/noamsto/tmux-remux/internal/snapshot"
 	"github.com/noamsto/tmux-remux/internal/store"
@@ -12,8 +13,9 @@ import (
 
 // TestRenderList_NeverOverflowsFrame guards the list-pane box math: a lipgloss
 // frame pads short content but does NOT clip overflow, so a wrapped row or
-// footer pushes the border past the requested height and desyncs the sibling
-// panes. Rendered output must be exactly width×height for every size — even a
+// footer pushes the border past the requested height — MaxHeight then cuts the
+// line list, dropping the closing border rather than the excess — and desyncs
+// the sibling panes. Rendered output must be exactly width×height for every size — even a
 // narrow pane with a hidden-count footer pinned to the bottom. Per-row
 // truncation of a long label is covered by TestRenderCloseTree_NeverOverflowsFrame
 // instead, since renderList's row format no longer reads a close-specific label.
@@ -73,11 +75,12 @@ func TestView_NarrowStacksPanel(t *testing.T) {
 	}
 }
 
-// The close picker shares renderPreview with the snapshot picker, so
-// narrow-width stacking must cover ModeClose too: at 100 columns (the
-// stacksPanel range) the panel goes below the tree rather than being dropped.
-// Selects the window node so renderPreview draws the pane-layout map.
-func TestView_CloseModeStacksPanel(t *testing.T) {
+// Close mode is two frames side by side at 100 columns — the width that used
+// to stack the panel under a three-column body. Asserts the layout, not just
+// stacksPanel(): every frame's top-left corner sits on the same row, and there
+// are two of them, so the panel is beside the tree and no third column
+// survives. Selects a window-scoped close so the panel draws a pane map.
+func TestView_CloseModeDrawsTwoFramesSideBySide(t *testing.T) {
 	applyTheme(NewTheme())
 	sub := snapshot.Manifest{
 		V: 1,
@@ -105,18 +108,80 @@ func TestView_CloseModeStacksPanel(t *testing.T) {
 	m.SetCloseTree(BuildCloseTree([]store.Event{ev}, ctxs, "demo", nil))
 	m.Bootstrap()
 	m.width, m.height = 100, 30
-	m.focus = focusTree
-	m.treeCursor = windowNodeIndex(t, m)
 
-	if !m.stacksPanel() {
-		t.Fatal("want stacksPanel() true at 100 columns")
+	out := m.View().Content
+	if !strings.ContainsRune(out, '┌') {
+		t.Errorf("View() dropped the pane map in close mode at 100 columns:\n%s", out)
 	}
-	panel := m.renderPreview(m.width)
-	if !strings.ContainsRune(panel, '┌') {
-		t.Errorf("panel not rendered in close mode at 100 columns:\n%s", panel)
+	var rows []int
+	for i, line := range strings.Split(out, "\n") {
+		if n := strings.Count(line, "╭"); n > 0 {
+			rows = append(rows, n)
+			if i != 0 {
+				t.Errorf("a frame opens on row %d; want every frame to open on row 0:\n%s", i, out)
+			}
+		}
 	}
-	if out := m.View().Content; !strings.ContainsRune(out, '┌') {
-		t.Errorf("View() dropped the stacked panel in close mode at 100 columns:\n%s", out)
+	if len(rows) != 1 || rows[0] != 2 {
+		t.Errorf("frame corners per row = %v, want exactly one row carrying 2:\n%s", rows, out)
+	}
+}
+
+// Snapshot mode's three-column View has been the single most important
+// invariant on this branch — every task had to avoid breaking it — but
+// nothing pinned its geometry the way TestView_CloseModeDrawsTwoFramesSideBySide
+// pins close mode's. Checks, at several widths and heights: the render is
+// exactly terminal-sized, all three frames open on row 0, and the bottom
+// border row survives intact. A lipgloss.Height(out) == h check alone would
+// not catch a dropped border — lipgloss v2's MaxHeight hard-truncates the
+// line list rather than clipping content — so this asserts the corners
+// directly, the same way TestRenderClosePreview_NeverOverflowsFrame does.
+func TestView_SnapshotModeThreeColumnGeometry(t *testing.T) {
+	applyTheme(NewTheme())
+	events := []store.Event{{
+		ID: 1, Ts: time.Now().UnixMilli(), Kind: "snapshot",
+		ManifestJSON: `{"v":1,"sessions":[{"name":"s","windows":[{"index":1,"name":"w","panes":[{"index":0,"command":"fish"}]}]}]}`,
+	}}
+	sizes := []struct{ w, h int }{
+		{120, 24}, {120, 40}, {160, 30}, {200, 50},
+	}
+	for _, sz := range sizes {
+		m := NewPickerModel(ModeSnapshot, events, nil, nil)
+		m.Bootstrap()
+		m.width, m.height = sz.w, sz.h
+
+		out := m.View().Content
+		if got := lipgloss.Height(out); got != sz.h {
+			t.Errorf("w=%d h=%d: rendered height=%d, want %d\n%s", sz.w, sz.h, got, sz.h, out)
+		}
+		if got := lipgloss.Width(out); got != sz.w {
+			t.Errorf("w=%d h=%d: rendered width=%d, want %d", sz.w, sz.h, got, sz.w)
+		}
+
+		rows := strings.Split(out, "\n")
+		var topRows []int
+		for i, line := range rows {
+			if n := strings.Count(line, "╭"); n > 0 {
+				topRows = append(topRows, n)
+				if i != 0 {
+					t.Errorf("w=%d h=%d: a frame opens on row %d; want every frame to open on row 0:\n%s", sz.w, sz.h, i, out)
+				}
+			}
+		}
+		if len(topRows) != 1 || topRows[0] != 3 {
+			t.Errorf("w=%d h=%d: frame corners per row = %v, want exactly one row carrying 3:\n%s", sz.w, sz.h, topRows, out)
+		}
+
+		var closed bool
+		for _, line := range rows {
+			if strings.Count(line, "╰") == 3 && strings.Count(line, "╯") == 3 {
+				closed = true
+				break
+			}
+		}
+		if !closed {
+			t.Errorf("w=%d h=%d: no row closes all three frames (missing ╰/╯):\n%s", sz.w, sz.h, out)
+		}
 	}
 }
 
@@ -193,5 +258,273 @@ func TestShortReason(t *testing.T) {
 		if got := shortReason(tc.in); got != tc.want {
 			t.Errorf("shortReason(%q) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+// allCloseNodes returns every node in the tree, ignoring expansion state.
+// The style and marker rules are properties of a node, not of whether it
+// happens to be on screen, so these tests must not go through FlattenClose —
+// it stops at a collapsed parent and would silently skip whole row kinds.
+func allCloseNodes(root *CloseNode) []*CloseNode {
+	var out []*CloseNode
+	var walk func(n *CloseNode)
+	walk = func(n *CloseNode) {
+		out = append(out, n)
+		for _, c := range n.Children {
+			walk(c)
+		}
+	}
+	for _, g := range root.Children {
+		walk(g)
+	}
+	return out
+}
+
+// The close tree must never render faint or italic text: the picker used both
+// to mean "not a restore target", which reads as "old / unimportant" instead —
+// and dimOlderThan already claims that visual channel for age.
+func TestCloseRowStyle_NeverFaintOrItalic(t *testing.T) {
+	applyTheme(Theme{})
+	for _, n := range allCloseNodes(closeTreeFixture()) {
+		s := closeRowStyle(n)
+		if s.GetFaint() {
+			t.Errorf("%q: style is faint", n.Label)
+		}
+		if s.GetItalic() {
+			t.Errorf("%q: style is italic", n.Label)
+		}
+	}
+}
+
+// Scaffolding must still be visually separable from a restorable row — just by
+// a different foreground, not by dimming.
+func TestCloseRowStyle_ScaffoldingDiffersFromEventRow(t *testing.T) {
+	applyTheme(Theme{})
+	var event, scaffold *CloseNode
+	for _, n := range allCloseNodes(closeTreeFixture()) {
+		if IsCloseGroup(n) {
+			continue
+		}
+		if n.EventID != 0 && event == nil {
+			event = n
+		}
+		if n.EventID == 0 && scaffold == nil {
+			scaffold = n
+		}
+	}
+	if event == nil || scaffold == nil {
+		t.Fatalf("fixture lacks both row kinds: event=%v scaffold=%v", event, scaffold)
+	}
+	if closeRowStyle(event).GetForeground() == closeRowStyle(scaffold).GetForeground() {
+		t.Error("event and scaffolding rows share a foreground colour")
+	}
+}
+
+// The marker is the load-bearing "Enter works here" cue, so it must appear on
+// exactly the rows that carry an event id.
+func TestCloseRow_MarksOnlyRestorableRows(t *testing.T) {
+	applyTheme(Theme{})
+	for _, n := range allCloseNodes(closeTreeFixture()) {
+		if IsCloseGroup(n) {
+			continue
+		}
+		got := strings.Contains(closeRow(n, 60, false), closeMarker)
+		if want := n.EventID != 0; got != want {
+			t.Errorf("%q: marker present=%v, want %v", n.Label, got, want)
+		}
+	}
+}
+
+// State is a tag, not a suffix: " · live" reads as part of the window name.
+func TestCloseRow_StateRendersAsAParenthesisedTag(t *testing.T) {
+	applyTheme(Theme{})
+	for _, n := range allCloseNodes(closeTreeFixture()) {
+		if n.State == "" {
+			continue
+		}
+		row := closeRow(n, 60, false)
+		if !strings.Contains(row, "("+n.State+")") {
+			t.Errorf("%q: want a (%s) tag, got %q", n.Label, n.State, row)
+		}
+		if strings.Contains(row, " · "+n.State) {
+			t.Errorf("%q: still renders the old ' · %s' suffix", n.Label, n.State)
+		}
+	}
+}
+
+func TestRestoreSentence(t *testing.T) {
+	man := snapshot.Manifest{Sessions: []snapshot.Session{{
+		Name:    "lazytmux",
+		Windows: []snapshot.Window{{Index: 3, Name: "docs"}, {Index: 4, Name: "src"}},
+	}}}
+	now := time.UnixMilli(1_000_000_000)
+	ts := now.Add(-22 * time.Minute).UnixMilli()
+
+	cases := []struct {
+		name  string
+		place ClosePlacement
+		want  []string
+	}{
+		{
+			name:  "window",
+			place: ClosePlacement{Session: "lazytmux", WindowIndex: 3, WindowName: "docs", Scope: "window", PaneCount: 2},
+			want: []string{
+				"↵ reopens window docs",
+				"  in lazytmux at index 3",
+				"2 panes · closed 22m ago",
+			},
+		},
+		{
+			name:  "pane",
+			place: ClosePlacement{Session: "lazytmux", WindowIndex: 3, WindowName: "docs", Scope: "pane"},
+			want: []string{
+				"↵ reopens a pane in lazytmux:3",
+				"closed 22m ago",
+			},
+		},
+		{
+			name:  "session",
+			place: ClosePlacement{Session: "lazytmux", Scope: "session"},
+			want: []string{
+				"↵ reopens session lazytmux (2 windows)",
+				"closed 22m ago",
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := restoreSentence(tc.place, man, now, ts)
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %d lines %q, want %d %q", len(got), got, len(tc.want), tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("line %d = %q, want %q", i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestHumanAge(t *testing.T) {
+	cases := []struct {
+		in   time.Duration
+		want string
+	}{
+		{30 * time.Second, "just now"},
+		{22 * time.Minute, "22m ago"},
+		{3 * time.Hour, "3h ago"},
+		{50 * time.Hour, "2d ago"},
+	}
+	for _, tc := range cases {
+		if got := humanAge(tc.in); got != tc.want {
+			t.Errorf("humanAge(%v) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// The sub-manifest column restated the hierarchy the close tree already draws.
+// Close mode is two columns at every width that has room for a preview.
+func TestPaneWidths_CloseModeHasNoMiddleColumn(t *testing.T) {
+	for _, w := range []int{80, 100, 119, 120, 160, 200} {
+		m := PickerModel{mode: ModeClose, width: w, height: 40}
+		list, tree, preview := m.paneWidthsThree()
+		if tree != 0 {
+			t.Errorf("width=%d: middle column = %d, want 0", w, tree)
+		}
+		if preview <= 0 {
+			t.Errorf("width=%d: preview = %d, want > 0", w, preview)
+		}
+		if list+tree+preview != w {
+			t.Errorf("width=%d: columns sum to %d", w, list+tree+preview)
+		}
+		if list < 32 {
+			t.Errorf("width=%d: tree column = %d, below the 32-cell floor", w, list)
+		}
+	}
+}
+
+// Snapshot mode is untouched: it keeps three columns at 120 and above.
+func TestPaneWidths_SnapshotModeKeepsThreeColumns(t *testing.T) {
+	m := PickerModel{mode: ModeSnapshot, width: 160, height: 40}
+	if _, tree, _ := m.paneWidthsThree(); tree == 0 {
+		t.Error("snapshot mode lost its middle column")
+	}
+}
+
+// Two columns side by side at every width — close mode never stacks.
+func TestView_CloseModeNeverStacks(t *testing.T) {
+	for _, w := range []int{90, 100, 119} {
+		m := PickerModel{mode: ModeClose, closeTree: closeTreeFixture(), width: w, height: 24}
+		if m.stacksPanel() {
+			t.Errorf("width=%d: close mode stacked the panel", w)
+		}
+	}
+}
+
+// Tab is snapshot-only, so close mode's footer must not advertise it — while
+// both modes still advertise the preview scroll wherever a preview column
+// exists. Reads the keys off the bindings so a rebind can't fake a pass.
+func TestRenderFooter_TabHintIsSnapshotOnly(t *testing.T) {
+	applyTheme(NewTheme())
+	tabKey := defaultKeys().Tab.Help().Key
+	scrollKey := defaultKeys().PreviewUp.Help().Key
+
+	closeM := PickerModel{mode: ModeClose, keys: defaultKeys(), width: 160, height: 40}
+	foot := stripANSI(closeM.renderFooter(closeM.width))
+	if strings.Contains(foot, tabKey+":") {
+		t.Errorf("close footer advertises Tab (%q):\n%s", tabKey, foot)
+	}
+	if !strings.Contains(foot, scrollKey+":") {
+		t.Errorf("close footer dropped the preview-scroll hint (%q):\n%s", scrollKey, foot)
+	}
+
+	snapM := PickerModel{mode: ModeSnapshot, keys: defaultKeys(), width: 160, height: 40}
+	foot = stripANSI(snapM.renderFooter(snapM.width))
+	if !strings.Contains(foot, tabKey+":") {
+		t.Errorf("snapshot footer dropped the Tab hint (%q):\n%s", tabKey, foot)
+	}
+	if !strings.Contains(foot, scrollKey+":") {
+		t.Errorf("snapshot footer dropped the preview-scroll hint (%q):\n%s", scrollKey, foot)
+	}
+}
+
+// Tab is snapshot-only in the footer (see above); the `?` help overlay must
+// agree, since it lists what a key does independent of the footer's width
+// gating. Close mode has no second tree for Tab to reach — it must not appear
+// in close mode's help, and must still appear in snapshot mode's.
+func TestPickerModel_HelpOverlayTabIsSnapshotOnly(t *testing.T) {
+	applyTheme(NewTheme())
+	// "switch pane" is Tab's help description and appears nowhere else in the
+	// keymap, so its presence pins Tab specifically rather than any binding
+	// whose key label happens to be a common substring.
+	tabDesc := defaultKeys().Tab.Help().Desc
+
+	closeM := PickerModel{mode: ModeClose, closeTree: closeTreeFixture(), keys: defaultKeys(), help: help.New(), showHelp: true, width: 160, height: 40}
+	out := stripANSI(closeM.View().Content)
+	if strings.Contains(out, tabDesc) {
+		t.Errorf("close mode help overlay advertises Tab (%q):\n%s", tabDesc, out)
+	}
+
+	snapM := PickerModel{mode: ModeSnapshot, keys: defaultKeys(), help: help.New(), showHelp: true, width: 160, height: 40}
+	out = stripANSI(snapM.View().Content)
+	if !strings.Contains(out, tabDesc) {
+		t.Errorf("snapshot mode help overlay dropped the Tab hint (%q):\n%s", tabDesc, out)
+	}
+}
+
+// TestPickerModel_HelpOverlayShowsFullKeymap pins that the `?` overlay renders
+// bubbles' FullHelp, not ShortHelp: help.Model gates on its own ShowAll field,
+// which nothing set, so the overlay always fell back to ShortHelp regardless
+// of keyMap.FullHelp's content. PreviewUp's description never appears in
+// ShortHelp, so its presence here is only possible through FullHelp.
+func TestPickerModel_HelpOverlayShowsFullKeymap(t *testing.T) {
+	applyTheme(NewTheme())
+	previewDesc := defaultKeys().PreviewUp.Help().Desc
+
+	m := PickerModel{mode: ModeSnapshot, keys: defaultKeys(), help: help.New(), showHelp: true, width: 160, height: 40}
+	out := stripANSI(m.View().Content)
+	if !strings.Contains(out, previewDesc) {
+		t.Errorf("help overlay did not render FullHelp (missing %q):\n%s", previewDesc, out)
 	}
 }

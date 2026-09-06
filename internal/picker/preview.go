@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -56,6 +57,9 @@ type scrollbackLoadedMsg struct {
 // renderPreview renders the right-most preview pane. width is the cell budget
 // (including the rounded border). Height comes from m.height.
 func (m PickerModel) renderPreview(width int) string {
+	if m.mode == ModeClose && m.closeTree != nil {
+		return m.renderClosePreview(width)
+	}
 	frameHeight := m.panelFrameHeight()
 	innerHeight := m.previewInnerHeight()
 	innerWidth := width - 4
@@ -113,6 +117,118 @@ func (m PickerModel) renderPreview(width int) string {
 	return frame.Render(previewWindow(string(content), innerWidth, innerHeight, m.previewScroll, m.previewScrollX))
 }
 
+// renderClosePreview draws the panel for whatever close row the cursor is on.
+func (m PickerModel) renderClosePreview(width int) string {
+	frameHeight := m.panelFrameHeight()
+	innerHeight := m.previewInnerHeight()
+	innerWidth := width - 4
+	if innerWidth < 1 {
+		innerWidth = 1
+	}
+	frame := previewFrame.Width(width).Height(frameHeight).MaxHeight(frameHeight)
+
+	vis := m.CloseVisible()
+	if m.cursor < 0 || m.cursor >= len(vis) {
+		return frame.Render(rowDim.Render("(nothing selected)"))
+	}
+	n := vis[m.cursor]
+	if n.EventID == 0 {
+		return frame.Render(rowDim.Render("(a section — ↑↓ to reach a close)"))
+	}
+
+	cc := m.CloseContextFor(n.EventID)
+	if sha := closeSHAFor(cc); sha != "" {
+		if err := m.scrollbackErrors[sha]; err != nil {
+			return frame.Render(footerWarn.Render("(scrollback file missing: " + err.Error() + ")"))
+		}
+		if content, ok := m.scrollbacks[sha]; ok {
+			return frame.Render(previewWindow(string(content), innerWidth, innerHeight, m.previewScroll, m.previewScrollX))
+		}
+		if m.loadingSHAs[sha] {
+			return frame.Render(rowDim.Render("(loading scrollback…)"))
+		}
+		// Falling through to the map here would swap the panel's content type
+		// the moment a load lands.
+		return frame.Render(rowDim.Render("(scrollback pending)"))
+	}
+	w := closePreviewWindow(cc)
+	sentence := restoreSentence(cc.Placement, cc.SubManifest, time.Now(), n.Ts)
+	// A lipgloss frame pads short content but does not clip overflow — once the
+	// body already has more lines than fit, MaxHeight hard-truncates the line
+	// list, which drops the closing border row rather than the excess content.
+	// So the body must never exceed innerHeight lines: the map yields its rows
+	// to the sentence, which is truncated only once it alone does not fit.
+	if len(sentence) > innerHeight {
+		sentence = sentence[:innerHeight]
+	}
+	remaining := innerHeight - len(sentence)
+	var lines []string
+	switch {
+	case w == nil:
+		if remaining >= 1 {
+			lines = []string{rowDim.Render("(nothing captured for this close)")}
+		}
+	case remaining >= 2:
+		// renderWindowMap always emits a title line plus at least one map line
+		// (art, or its own "no layout" fallback), so it needs 2 rows of budget
+		// before it's called — at remaining==1 it would overflow by itself.
+		if art := m.renderWindowMap(w, innerWidth, remaining); art != "" {
+			lines = strings.Split(art, "\n")
+		} else {
+			lines = []string{rowDim.Render("(no layout captured for this window)")}
+		}
+	case remaining == 1:
+		lines = []string{rowDim.Render("(no layout captured for this window)")}
+	}
+	for _, line := range sentence {
+		lines = append(lines, rowDim.Render(ansi.Truncate(line, innerWidth, "…")))
+	}
+	return frame.Render(strings.Join(lines, "\n"))
+}
+
+// closePreviewWindow returns the window the preview should draw: the one the
+// placement names, or the sub-manifest's first window for a session close,
+// where every window came down and the first one stands for the rest.
+//
+// The two session names are independently sourced — Placement.Session from the
+// tmux hook, the sub-manifest's from the prior snapshot — and can disagree when
+// the session was renamed in between (see closeevent.OwnerSession's fallback
+// chain), so a name mismatch falls back to ignoring the name. Only with exactly
+// one session in the sub-manifest, though: past that, ignoring it could draw a
+// window belonging to a session other than the one that closed.
+func closePreviewWindow(cc CloseContext) *snapshot.Window {
+	if w := closePreviewWindowIn(cc, true); w != nil {
+		return w
+	}
+	if len(cc.SubManifest.Sessions) != 1 {
+		return nil
+	}
+	return closePreviewWindowIn(cc, false)
+}
+
+// closePreviewWindowIn searches cc.SubManifest.Sessions for the placement's
+// window. With matchSession, a session whose name differs from
+// cc.Placement.Session is skipped — window indexes are only unique within a
+// session, so a sub-manifest carrying more than one needs the name to pick
+// the right one.
+func closePreviewWindowIn(cc CloseContext, matchSession bool) *snapshot.Window {
+	for i := range cc.SubManifest.Sessions {
+		s := &cc.SubManifest.Sessions[i]
+		if matchSession && cc.Placement.Session != "" && s.Name != cc.Placement.Session {
+			continue
+		}
+		for j := range s.Windows {
+			if cc.Placement.Scope == "session" {
+				return &s.Windows[j]
+			}
+			if s.Windows[j].Index == cc.Placement.WindowIndex {
+				return &s.Windows[j]
+			}
+		}
+	}
+	return nil
+}
+
 // previewWindow returns the slice of scrollback to display: structural ANSI
 // removed (so cursor moves and erase codes don't break the lipgloss frame),
 // each logical line horizontally windowed to [scrollX, scrollX+width) and the
@@ -161,19 +277,11 @@ func (m PickerModel) previewInnerHeight() int {
 // previewMaxScroll returns the largest valid m.previewScroll for the current
 // pane's scrollback. Used to clamp Alt+K scroll-up at the top of the buffer.
 func (m PickerModel) previewMaxScroll(innerHeight int) int {
-	nodes := m.visibleNodes()
-	if m.treeCursor < 0 || m.treeCursor >= len(nodes) {
+	sha := m.previewSHA()
+	if sha == "" {
 		return 0
 	}
-	n := nodes[m.treeCursor]
-	if n.Kind != NodePane {
-		return 0
-	}
-	p, _ := n.Ref.(*snapshot.Pane)
-	if p == nil {
-		return 0
-	}
-	content, ok := m.scrollbacks[p.ScrollbackSHA]
+	content, ok := m.scrollbacks[sha]
 	if !ok {
 		return 0
 	}
@@ -236,6 +344,62 @@ func (m PickerModel) renderWindowMap(w *snapshot.Window, innerWidth, innerHeight
 	return rowDim.Render(ansi.Truncate(title, innerWidth, "…")) + "\n" + art
 }
 
+// restoreSentence states what Enter on this close would do, in the terms the
+// restore path actually honours — a window goes back to its original index.
+func restoreSentence(p ClosePlacement, man snapshot.Manifest, now time.Time, ts int64) []string {
+	var out []string
+	switch p.Scope {
+	case "window":
+		out = append(out,
+			"↵ reopens window "+snapshot.StripFormat(p.WindowName),
+			fmt.Sprintf("  in %s at index %d", p.Session, p.WindowIndex),
+		)
+	case "pane":
+		out = append(out, fmt.Sprintf("↵ reopens a pane in %s:%d", p.Session, p.WindowIndex))
+	case "session":
+		out = append(out, fmt.Sprintf("↵ reopens session %s (%s)", p.Session, countPhrase(countWindows(man), "window")))
+	default:
+		return nil
+	}
+
+	age := "closed " + humanAge(now.Sub(time.UnixMilli(ts)))
+	if p.PaneCount > 0 {
+		age = countPhrase(p.PaneCount, "pane") + " · " + age
+	}
+	return append(out, age)
+}
+
+// humanAge renders a duration as the coarsest unit that still reads true.
+func humanAge(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd ago", int(d.Hours())/24)
+	}
+}
+
+// countPhrase renders "1 pane" / "2 panes".
+func countPhrase(n int, noun string) string {
+	if n == 1 {
+		return fmt.Sprintf("%d %s", n, noun)
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
+}
+
+// countWindows totals the windows a manifest would restore.
+func countWindows(man snapshot.Manifest) int {
+	n := 0
+	for _, s := range man.Sessions {
+		n += len(s.Windows)
+	}
+	return n
+}
+
 // paneMapHintHeight is the box-art height of the mini-map shown above a pane's
 // scrollback. panemap needs minMapHeight (6) to draw art rather than a summary.
 const paneMapHintHeight = 7
@@ -247,6 +411,13 @@ const paneMapHintHeight = 7
 // preview column is never narrower than the map's minimum, so when it shows the
 // strip is always paneMapHintHeight rows plus one separator.
 func (m PickerModel) paneHintShows() bool {
+	// Snapshot mode only. Close mode renders its own preview and never reaches
+	// the mini-map, but it still carries a treeCursor no key drives — without
+	// this guard a stale cursor landing on a pane node would silently charge
+	// close mode for a strip it does not draw.
+	if m.mode != ModeSnapshot {
+		return false
+	}
 	if m.previewInnerHeight() < paneMapHintHeight+1+6 { // map + separator + scrollback
 		return false
 	}

@@ -13,6 +13,10 @@ var (
 	rowActive  lipgloss.Style
 	rowDefault lipgloss.Style
 	rowDim     lipgloss.Style
+	// rowScaffold styles close-tree rows that exist only to parent something
+	// restorable. Quieter than body text, but never faint — dimming is how the
+	// picker says "old", and these rows are not old, just not targets.
+	rowScaffold lipgloss.Style
 
 	nodeSession lipgloss.Style
 	nodeWindow  lipgloss.Style
@@ -44,6 +48,7 @@ func applyTheme(t Theme) {
 	rowActive = lipgloss.NewStyle().Foreground(t.Base()).Background(t.Mauve()).Bold(true)
 	rowDefault = lipgloss.NewStyle().Foreground(t.Text())
 	rowDim = lipgloss.NewStyle().Foreground(t.Overlay())
+	rowScaffold = lipgloss.NewStyle().Foreground(t.Subtext())
 
 	nodeSession = lipgloss.NewStyle().Foreground(t.Mauve()).Bold(true)
 	nodeWindow = lipgloss.NewStyle().Foreground(t.Blue())

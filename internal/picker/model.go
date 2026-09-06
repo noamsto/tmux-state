@@ -134,8 +134,10 @@ func (m PickerModel) ScrollbackFor(sha string) ([]byte, bool) {
 // ScrollbackError returns the cached load error for sha, or nil.
 func (m PickerModel) ScrollbackError(sha string) error { return m.scrollbackErrors[sha] }
 
-// Init satisfies tea.Model.
-func (m PickerModel) Init() tea.Cmd { return nil }
+// Init satisfies tea.Model. Close mode's preview is live from the first frame,
+// so the cursor's scrollback has to be scheduled before any key arrives —
+// otherwise the panel falls back to the window map until the user moves.
+func (m PickerModel) Init() tea.Cmd { return (&m).PreviewCmd() }
 
 // Update handles key events. Implementation grows across the next few tasks.
 func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -323,24 +325,26 @@ func (m PickerModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// after this clear.
 	m.footerNote = ""
 	// Close mode with a grouped tree: the cursor walks tree rows, so Up/Down
-	// skip headers and Left/Right collapse and expand them. Only while the close
-	// tree holds focus — once Tab moves to the sub-manifest the arrows belong to
-	// its pane cursor, which is what drives the scrollback preview.
+	// skip headers and Left/Right collapse and expand them.
 	if m.mode == ModeClose && m.closeTree != nil && m.focus == focusList {
 		vis := m.CloseVisible()
 		switch {
 		case key.Matches(msg, m.keys.Up):
 			if idx := m.nextCloseIdx(m.cursor, -1); idx >= 0 {
 				m.cursor = idx
+				m.previewScroll = 0
+				m.previewScrollX = 0
 				(&m).ensureManifest()
 			}
-			return m, nil
+			return m, (&m).PreviewCmd()
 		case key.Matches(msg, m.keys.Down):
 			if idx := m.nextCloseIdx(m.cursor, +1); idx >= 0 {
 				m.cursor = idx
+				m.previewScroll = 0
+				m.previewScrollX = 0
 				(&m).ensureManifest()
 			}
-			return m, nil
+			return m, (&m).PreviewCmd()
 		case key.Matches(msg, m.keys.Right):
 			if m.cursor >= 0 && m.cursor < len(vis) {
 				if n := vis[m.cursor]; len(n.Children) > 0 {
@@ -350,17 +354,24 @@ func (m PickerModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case key.Matches(msg, m.keys.Left):
 			if m.cursor >= 0 && m.cursor < len(vis) {
-				// Collapse the row itself when it is an open parent, otherwise
-				// collapse its parent and step onto it.
 				n := vis[m.cursor]
 				if n.Expanded && len(n.Children) > 0 {
 					n.Expanded = false
 					return m, nil
 				}
-				if p := n.Parent; p != nil && p.Parent != nil {
-					p.Expanded = false
-					m.cursor = closeIndexOf(m.CloseVisible(), p)
+				// Collapse the nearest collapsible ancestor below the
+				// synthetic root, then land on a row the cursor may occupy.
+				for a := n.Parent; a != nil && a.Parent != nil; a = a.Parent {
+					if !a.Expanded || len(a.Children) == 0 {
+						continue
+					}
+					a.Expanded = false
+					next := m.CloseVisible()
+					m.cursor = closeNavAt(next, closeIndexOf(next, a))
+					m.previewScroll = 0
+					m.previewScrollX = 0
 					(&m).ensureManifest()
+					return m, (&m).PreviewCmd()
 				}
 			}
 			return m, nil
@@ -409,9 +420,9 @@ func (m PickerModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	// Focus-tree key handling: intercept Up/Down/Left/Right so they walk the
-	// manifest tree's panes. Close mode's tree is the sub-manifest of what was
-	// lost, and its panes preview the same way.
-	if (m.mode == ModeSnapshot || m.mode == ModeClose) && m.focus == focusTree {
+	// manifest tree's panes. Snapshot mode only: nothing moves focus off
+	// focusList in close mode.
+	if m.mode == ModeSnapshot && m.focus == focusTree {
 		switch {
 		case key.Matches(msg, m.keys.Up):
 			if idx := m.nextPaneIdx(m.treeCursor, -1); idx >= 0 {
@@ -488,9 +499,9 @@ func (m PickerModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Quit):
 		return m, tea.Quit
 	case key.Matches(msg, m.keys.Tab):
-		// Both modes have a tree of panes to reach; close mode's is the
-		// sub-manifest of what the event took down.
-		if m.mode == ModeSnapshot || m.mode == ModeClose {
+		// Snapshot mode only: close mode is two columns with no second tree to
+		// reach, and its preview scrolls with Alt+j/k regardless of focus.
+		if m.mode == ModeSnapshot {
 			if m.focus == focusList {
 				m.focus = focusTree
 				nodes := m.visibleNodes()
@@ -652,9 +663,11 @@ func (m PickerModel) CurrentEventID() int64 {
 }
 
 // isCloseNavTarget reports whether the cursor may land on n: an event row
-// (restorable) or a collapsible header (so it can be opened).
+// (restorable) or one of the two group headers (so a section can be
+// collapsed). Scaffolding — the nodes that exist only to parent something
+// restorable — is never a stop: Enter would only refuse it.
 func isCloseNavTarget(n *CloseNode) bool {
-	return n.EventID != 0 || len(n.Children) > 0
+	return n.EventID != 0 || IsCloseGroup(n)
 }
 
 // nextCloseIdx walks from start in dir (+1/-1) to the next navigable row, or
@@ -694,6 +707,22 @@ func closeIndexOf(vis []*CloseNode, target *CloseNode) int {
 	return 0
 }
 
+// closeNavAt returns idx when vis[idx] is a cursor stop, else the nearest stop
+// above it. Collapsing an ancestor leaves the cursor pointing at a row it may
+// no longer land on; walking up always terminates, since row 0 is a group
+// header.
+func closeNavAt(vis []*CloseNode, idx int) int {
+	if idx >= len(vis) {
+		idx = len(vis) - 1
+	}
+	for i := idx; i >= 0; i-- {
+		if isCloseNavTarget(vis[i]) {
+			return i
+		}
+	}
+	return 0
+}
+
 // CloseContextFor returns the cached close context for the given event ID,
 // or the zero-value CloseContext if absent.
 func (m PickerModel) CloseContextFor(id int64) CloseContext {
@@ -706,14 +735,14 @@ func (m PickerModel) FooterNote() string { return m.footerNote }
 // TreeFor returns the cached tree for the event with the given ID, or nil.
 func (m PickerModel) TreeFor(id int64) *TreeNode { return m.trees[id] }
 
-// PreviewCmd returns a tea.Cmd that loads the scrollback for the currently
-// focused tree-pane node, or nil if no load is needed (wrong focus, no SHA,
-// cached, already loading, or no scrollback store).
+// PreviewCmd returns a tea.Cmd that loads the scrollback the preview needs, or
+// nil if no load is needed (nothing to show, no SHA, cached, already loading,
+// or no scrollback store).
 //
 // Side effect: marks the SHA as in-flight in m.loadingSHAs before returning.
 // Pointer receiver is required to write through to that map.
 func (m *PickerModel) PreviewCmd() tea.Cmd {
-	sha := m.focusedPaneSHA()
+	sha := m.previewSHA()
 	if sha == "" || m.scrollbackStore == nil {
 		return nil
 	}
@@ -730,10 +759,13 @@ func (m *PickerModel) PreviewCmd() tea.Cmd {
 	return loadScrollbackCmd(m.scrollbackStore, sha)
 }
 
-// focusedPaneSHA returns the ScrollbackSHA of the currently focused tree-pane
-// node, or "" if focus is not on the tree, the node is not a pane, or the
-// pane has no scrollback.
-func (m PickerModel) focusedPaneSHA() string {
+// previewSHA returns the ScrollbackSHA the preview is currently showing, or ""
+// when it is not showing scrollback. Close mode reads the close-tree cursor and
+// ignores focus; snapshot mode requires Tab to reach its tree.
+func (m PickerModel) previewSHA() string {
+	if m.mode == ModeClose && m.closeTree != nil {
+		return m.closeCursorSHA()
+	}
 	if m.focus != focusTree {
 		return ""
 	}
@@ -750,6 +782,36 @@ func (m PickerModel) focusedPaneSHA() string {
 		return ""
 	}
 	return p.ScrollbackSHA
+}
+
+// closeCursorSHA resolves the cursor's close context and returns its scrollback
+// hash.
+func (m PickerModel) closeCursorSHA() string {
+	vis := m.CloseVisible()
+	if m.cursor < 0 || m.cursor >= len(vis) {
+		return ""
+	}
+	return closeSHAFor(m.CloseContextFor(vis[m.cursor].EventID))
+}
+
+// closeSHAFor returns the scrollback hash of the pane cc's close took down, or
+// "" when cc is not a pane-scoped close. Only a pane close has one pane's worth
+// of output to show; a window or session close is previewed as a layout map
+// instead.
+func closeSHAFor(cc CloseContext) string {
+	if cc.Placement.Scope != "pane" || cc.Placement.PaneID == "" {
+		return ""
+	}
+	w := closePreviewWindow(cc)
+	if w == nil {
+		return ""
+	}
+	for i := range w.Panes {
+		if w.Panes[i].ID == cc.Placement.PaneID {
+			return w.Panes[i].ScrollbackSHA
+		}
+	}
+	return ""
 }
 
 // ensureManifest parses + builds + decorates the tree for the cursor's event,

@@ -14,7 +14,13 @@ import (
 // View renders the full picker UI. Called by Bubble Tea after every Update.
 func (m PickerModel) View() tea.View {
 	if m.showHelp {
-		v := tea.NewView(m.help.View(m.keys))
+		// keyMap.mode is never set at construction, so stamp the live mode on
+		// here — the one place ShortHelp/FullHelp are consulted.
+		helpKeys := m.keys
+		helpKeys.mode = m.mode
+		hm := m.help
+		hm.ShowAll = true // this overlay is the full keymap; ShortHelp is for the footer.
+		v := tea.NewView(hm.View(helpKeys))
 		v.AltScreen = true
 		return v
 	}
@@ -34,22 +40,12 @@ func (m PickerModel) View() tea.View {
 	switch {
 	case m.mode == ModeClose && m.closeTree != nil && m.width < 80:
 		content = lipgloss.JoinVertical(lipgloss.Left, renderCloseTree(m, m.width, bodyHeight), footer)
-	case m.mode == ModeClose && m.closeTree != nil && previewWidth == 0:
-		// Close tree + sub-manifest on top, preview panel stacked below.
-		topHeight := bodyHeight - m.panelFrameHeight()
-		closes := renderCloseTree(m, listWidth, topHeight)
-		tree := renderTree(m, m.width-listWidth, topHeight)
-		top := lipgloss.JoinHorizontal(lipgloss.Top, closes, tree)
-		panel := m.renderPreview(m.width)
-		content = lipgloss.JoinVertical(lipgloss.Left, top, panel, footer)
 	case m.mode == ModeClose && m.closeTree != nil:
-		// Same, plus what the pane under the sub-manifest cursor had on screen.
-		// A closed pane is read out of the snapshot the close was diffed
-		// against, so it carries that snapshot's scrollback.
+		// Close tree beside the preview of what the cursor's close would
+		// reopen.
 		closes := renderCloseTree(m, listWidth, bodyHeight)
-		tree := renderTree(m, treeWidth, bodyHeight)
 		preview := m.renderPreview(previewWidth)
-		body := lipgloss.JoinHorizontal(lipgloss.Top, closes, tree, preview)
+		body := lipgloss.JoinHorizontal(lipgloss.Top, closes, preview)
 		content = lipgloss.JoinVertical(lipgloss.Left, body, footer)
 	case m.width < 80:
 		list := renderList(m, listWidth, bodyHeight)
@@ -119,10 +115,13 @@ func (m PickerModel) renderFooter(width int) string {
 		// inside it.
 		parts = append(parts, hint(m.keys.Right))
 	}
-	// 120 is where both modes gain the preview column; the preview is otherwise
-	// undiscoverable, since nothing else says Tab reaches it.
-	if m.width >= 120 {
-		parts = append(parts, hint(m.keys.Tab))
+	// Tab reaches snapshot mode's sub-manifest tree; close mode has no second
+	// tree, and its preview scrolls with Alt+j/k regardless of focus.
+	_, _, previewW := m.paneWidthsThree()
+	if previewW > 0 {
+		if m.mode == ModeSnapshot {
+			parts = append(parts, hint(m.keys.Tab))
+		}
 		parts = append(parts, hint(m.keys.PreviewUp))
 	}
 	line := strings.Join(parts, sep)
@@ -153,9 +152,13 @@ func (m PickerModel) bodyHeight() int {
 }
 
 // stacksPanel reports whether the map/scrollback panel goes under the tree
-// rather than beside it — the case for a terminal too narrow for a third column.
-// The popup is 90% of the client, so that threshold lands near 120 columns.
+// rather than beside it — the case for a terminal too narrow for a third
+// column. The popup is 90% of the client, so that threshold lands near 120
+// columns. Close mode only ever has two columns, so it never stacks.
 func (m PickerModel) stacksPanel() bool {
+	if m.mode == ModeClose {
+		return false
+	}
 	return m.width >= 80 && m.width < 120
 }
 
@@ -177,20 +180,13 @@ func (m PickerModel) paneWidthsThree() (int, int, int) {
 		return m.width, 0, 0
 	}
 	if m.mode == ModeClose {
-		if m.width < 120 {
-			// Give the list ~40% so labels like "session: reviewtest2401692
-			// (1w)" fit. No room for a third column, as in snapshot mode below.
-			listW := m.width * 2 / 5
-			if listW < 32 {
-				listW = 32
-			}
-			return listW, m.width - listW, 0
-		}
-		// Thirds keep the list past its 32-cell floor while leaving the preview
-		// enough to read a wrapped line of scrollback.
-		listW := m.width / 3
-		treeW := m.width / 3
-		return listW, treeW, m.width - listW - treeW
+		// 40% keeps the tree past its 32-cell floor for deep guide prefixes
+		// and long session labels, and leaves the preview at least 30 cells —
+		// enough for a pane map and the restore sentence under it. Both bounds
+		// hold for every width the guard above admits (2w/5 >= 32 and
+		// w-2w/5 >= 30 once w >= 80), so neither needs a clamp.
+		treeW := m.width * 2 / 5
+		return treeW, 0, m.width - treeW
 	}
 	if m.width < 120 {
 		// Two-pane fallback (current behavior).
@@ -315,9 +311,16 @@ func renderCloseTree(m PickerModel, width, height int) string {
 	return frame.Render(b.String())
 }
 
-// closeRow renders one tree row: guide prefix, expand marker, label, and a
-// right-aligned timestamp for event rows. State markers ("· live" / "· gone")
-// mark headers that carry nothing to restore.
+// closeMarker precedes every restorable row; scaffolding at the same depth
+// gets two cells of blank instead, so their labels line up. Alignment only
+// holds between rows that agree on having children: the expand marker
+// ("▾ "/"▸ ") emitted just before this is absent on childless rows, so a
+// parent's label still starts two cells right of a childless row's.
+const closeMarker = "● "
+
+// closeRow renders one tree row: guide prefix, expand marker, restore marker,
+// label, a parenthesised state tag on scaffolding, and a right-aligned
+// timestamp for event rows.
 func closeRow(n *CloseNode, innerWidth int, active bool) string {
 	left := closeGuidePrefix(n)
 	switch {
@@ -326,9 +329,16 @@ func closeRow(n *CloseNode, innerWidth int, active bool) string {
 	case len(n.Children) > 0:
 		left += "▸ "
 	}
+	if !IsCloseGroup(n) {
+		if n.EventID != 0 {
+			left += closeMarker
+		} else {
+			left += strings.Repeat(" ", lipgloss.Width(closeMarker))
+		}
+	}
 	left += n.Label
 	if n.State != "" {
-		left += " · " + n.State
+		left += " (" + n.State + ")"
 	}
 
 	right := ""
@@ -361,19 +371,26 @@ func closeRow(n *CloseNode, innerWidth int, active bool) string {
 		// invisible. Same reason appendNodeRows renders the active row plain.
 		return rowActive.Width(innerWidth).Render(line)
 	}
-	style := nodePane
-	switch n.Kind {
-	case GroupThis, GroupOther:
-		style = previewHeader
-	case CSession:
-		style = nodeSession
-	case CWindow:
-		style = nodeWindow
+	return closeRowStyle(n).Width(innerWidth).Render(line)
+}
+
+// closeRowStyle returns the single flat style for a non-cursor close row.
+// Scaffolding is separated from restorable rows by foreground alone — never by
+// Faint or Italic, which the picker reserves for age.
+func closeRowStyle(n *CloseNode) lipgloss.Style {
+	if IsCloseGroup(n) {
+		return previewHeader
 	}
 	if n.EventID == 0 {
-		style = style.Faint(true).Italic(true)
+		return rowScaffold
 	}
-	return style.Width(innerWidth).Render(line)
+	switch n.Kind {
+	case CSession:
+		return nodeSession
+	case CWindow:
+		return nodeWindow
+	}
+	return nodePane
 }
 
 // hiddenPhrase renders the pluralized "N unrecoverable close(s)" fragment.

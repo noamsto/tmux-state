@@ -405,3 +405,88 @@ func revealedLabels(nodes []*picker.CloseNode) []string {
 	}
 	return out
 }
+
+// nestedCloseModel builds a bootstrapped close-mode picker over a session →
+// window → pane scaffolding chain, which closeModel has none of: lazytmux is
+// gone, its window 3 is a live header, and the only restorable thing inside it
+// is a pane close.
+func nestedCloseModel(t *testing.T) picker.PickerModel {
+	t.Helper()
+	evs := []store.Event{{ID: 1, Ts: 300, Kind: "pane-died"}}
+	one := snapshot.Manifest{Sessions: []snapshot.Session{{Name: "lazytmux"}}}
+	ctxs := map[int64]picker.CloseContext{
+		1: {
+			Label:       "pane: fish",
+			Placement:   picker.ClosePlacement{Session: "lazytmux", WindowIndex: 3, WindowName: "docs", Scope: "pane"},
+			SubManifest: one,
+		},
+	}
+	m := picker.NewPickerModel(picker.ModeClose, evs, nil, nil)
+	m.SetCloseContexts(ctxs)
+	m.SetCloseTree(picker.BuildCloseTree(evs, ctxs, "mono", map[string]bool{}))
+	m.Bootstrap()
+	return m
+}
+
+// Scaffolding rows exist only to indent something restorable. Stopping on them
+// offers a row and then refuses it with "(group — nothing to restore here)".
+func TestModel_CloseNavigationSkipsScaffolding(t *testing.T) {
+	m := nestedCloseModel(t)
+	pm := m
+	// Walk the whole tree downward, then all the way back up.
+	for _, code := range []rune{'j', 'j', 'j', 'j', 'k', 'k', 'k', 'k'} {
+		updated, _ := pm.Update(tea.KeyPressMsg{Code: code})
+		pm = updated.(picker.PickerModel)
+		vis := pm.CloseVisible()
+		n := vis[pm.Cursor()]
+		if n.EventID == 0 && !picker.IsCloseGroup(n) {
+			t.Fatalf("cursor landed on scaffolding row %q", n.Label)
+		}
+	}
+}
+
+// Enter must never refuse a row the cursor can legally occupy: the refusal
+// footer note should appear exactly when that row is a group header. Walk
+// every reachable stop with 'k' — the only key that produces real upward
+// movement from this fixture's starting row — checking Enter at each one.
+func TestModel_CloseEnterRefusesOnlyGroupHeaders(t *testing.T) {
+	m := nestedCloseModel(t)
+	pm := m
+	for {
+		n := pm.CloseVisible()[pm.Cursor()]
+		updated, _ := pm.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+		got := updated.(picker.PickerModel)
+		if note, isGroup := got.FooterNote(), picker.IsCloseGroup(n); (note != "") != isGroup {
+			t.Fatalf("row %q (group=%v): Enter gave footer note %q", n.Label, isGroup, note)
+		}
+		updated, _ = got.Update(tea.KeyPressMsg{Code: 'k'})
+		next := updated.(picker.PickerModel)
+		if next.Cursor() == got.Cursor() {
+			break // no further upward stop — every reachable row has been checked
+		}
+		pm = next
+	}
+}
+
+// With scaffolding no longer a cursor stop, Left must collapse the nearest
+// collapsible ancestor and leave the cursor somewhere it may legally sit.
+func TestModel_CloseLeftCollapsesAncestorAndLandsNavigable(t *testing.T) {
+	m := nestedCloseModel(t)
+	// Cursor starts on the newest restorable row: the nested pane close.
+	pm := m
+	before := len(pm.CloseVisible())
+	updated, _ := pm.Update(tea.KeyPressMsg{Code: tea.KeyLeft})
+	pm = updated.(picker.PickerModel)
+
+	if after := len(pm.CloseVisible()); after >= before {
+		t.Errorf("Left did not collapse anything: %d rows before, %d after", before, after)
+	}
+	vis := pm.CloseVisible()
+	if pm.Cursor() < 0 || pm.Cursor() >= len(vis) {
+		t.Fatalf("cursor %d out of range for %d rows", pm.Cursor(), len(vis))
+	}
+	n := vis[pm.Cursor()]
+	if n.EventID == 0 && !picker.IsCloseGroup(n) {
+		t.Errorf("Left left the cursor on scaffolding row %q", n.Label)
+	}
+}
