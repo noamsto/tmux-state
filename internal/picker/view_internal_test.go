@@ -83,7 +83,7 @@ func TestView_NarrowStacksPanel(t *testing.T) {
 // to stack the panel under a three-column body. Asserts the layout, not just
 // stacksPanel(): every frame's top-left corner sits on the same row, and there
 // are two of them, so the panel is beside the tree and no third column
-// survives. Selects a window-scoped close so the panel draws a pane map.
+// survives.
 func TestView_CloseModeDrawsTwoFramesSideBySide(t *testing.T) {
 	applyTheme(NewTheme())
 	sub := snapshot.Manifest{
@@ -93,10 +93,8 @@ func TestView_CloseModeDrawsTwoFramesSideBySide(t *testing.T) {
 			Windows: []snapshot.Window{{
 				Index:  1,
 				Layout: "1cb4,80x24,0,0[80x11,0,0,0,80x12,0,12,1]",
-				Panes: []snapshot.Pane{
-					{Index: 0, ID: "%0", Command: "fish"},
-					{Index: 1, ID: "%1", Command: "agent-work"},
-				},
+				// A pane close's sub-manifest carries only the pane that died.
+				Panes: []snapshot.Pane{{Index: 1, ID: "%1", Command: "agent-work"}},
 			}},
 		}},
 	}
@@ -114,8 +112,8 @@ func TestView_CloseModeDrawsTwoFramesSideBySide(t *testing.T) {
 	m.width, m.height = 100, 30
 
 	out := m.View().Content
-	if !strings.ContainsRune(out, '┌') {
-		t.Errorf("View() dropped the pane map in close mode at 100 columns:\n%s", out)
+	if !strings.Contains(out, "1 · agent-work") {
+		t.Errorf("View() dropped the close preview's pane block at 100 columns:\n%s", out)
 	}
 	var rows []int
 	for i, line := range strings.Split(out, "\n") {
@@ -356,7 +354,7 @@ func TestCloseRow_StateRendersAsAParenthesisedTag(t *testing.T) {
 	}
 }
 
-func TestRestoreSentence(t *testing.T) {
+func TestClosePreviewHeader(t *testing.T) {
 	man := snapshot.Manifest{Sessions: []snapshot.Session{{
 		Name:    "lazytmux",
 		Windows: []snapshot.Window{{Index: 3, Name: "docs"}, {Index: 4, Name: "src"}},
@@ -373,37 +371,36 @@ func TestRestoreSentence(t *testing.T) {
 			name:  "window",
 			place: ClosePlacement{Session: "lazytmux", WindowIndex: 3, WindowName: "docs", Scope: "window", PaneCount: 2},
 			want: []string{
-				"↵ reopens window docs",
-				"  in lazytmux at index 3",
-				"2 panes · closed 22m ago",
+				"lazytmux:3 · docs",
+				"window close · 2 panes · closed 22m ago",
 			},
 		},
 		{
 			name:  "pane",
 			place: ClosePlacement{Session: "lazytmux", WindowIndex: 3, WindowName: "docs", Scope: "pane"},
 			want: []string{
-				"↵ reopens a pane in lazytmux:3",
-				"closed 22m ago",
+				"lazytmux:3 · docs",
+				"pane close · 1 pane · closed 22m ago",
 			},
 		},
 		{
 			name:  "session",
 			place: ClosePlacement{Session: "lazytmux", Scope: "session"},
 			want: []string{
-				"↵ reopens session lazytmux (2 windows)",
-				"closed 22m ago",
+				"lazytmux",
+				"session close · 2 windows · closed 22m ago",
 			},
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := restoreSentence(tc.place, man, now, ts)
+			got := closePreviewHeader(CloseContext{Placement: tc.place, SubManifest: man}, 80, now, ts)
 			if len(got) != len(tc.want) {
 				t.Fatalf("got %d lines %q, want %d %q", len(got), got, len(tc.want), tc.want)
 			}
 			for i := range got {
-				if got[i] != tc.want[i] {
-					t.Errorf("line %d = %q, want %q", i, got[i], tc.want[i])
+				if stripANSI(got[i]) != tc.want[i] {
+					t.Errorf("line %d = %q, want %q", i, stripANSI(got[i]), tc.want[i])
 				}
 			}
 		})

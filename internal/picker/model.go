@@ -742,30 +742,46 @@ func (m PickerModel) TreeFor(id int64) *TreeNode { return m.trees[id] }
 // Side effect: marks the SHA as in-flight in m.loadingSHAs before returning.
 // Pointer receiver is required to write through to that map.
 func (m *PickerModel) PreviewCmd() tea.Cmd {
-	sha := m.previewSHA()
-	if sha == "" || m.scrollbackStore == nil {
+	if m.scrollbackStore == nil {
 		return nil
 	}
-	if _, cached := m.scrollbacks[sha]; cached {
+	var cmds []tea.Cmd
+	for _, sha := range m.previewSHAs() {
+		if _, cached := m.scrollbacks[sha]; cached {
+			continue
+		}
+		if _, errored := m.scrollbackErrors[sha]; errored {
+			continue
+		}
+		if m.loadingSHAs[sha] {
+			continue
+		}
+		m.loadingSHAs[sha] = true
+		cmds = append(cmds, loadScrollbackCmd(m.scrollbackStore, sha))
+	}
+	if len(cmds) == 0 {
 		return nil
 	}
-	if _, errored := m.scrollbackErrors[sha]; errored {
-		return nil
-	}
-	if m.loadingSHAs[sha] {
-		return nil
-	}
-	m.loadingSHAs[sha] = true
-	return loadScrollbackCmd(m.scrollbackStore, sha)
+	return tea.Batch(cmds...)
 }
 
-// previewSHA returns the ScrollbackSHA the preview is currently showing, or ""
-// when it is not showing scrollback. Close mode reads the close-tree cursor and
-// ignores focus; snapshot mode requires Tab to reach its tree.
-func (m PickerModel) previewSHA() string {
+// previewSHAs returns every ScrollbackSHA the preview needs loaded. Close mode
+// stacks one block per pane the close took down, so a single hash would leave
+// the second block stuck on "(scrollback pending)"; snapshot mode shows one
+// pane and yields at most one.
+func (m PickerModel) previewSHAs() []string {
 	if m.mode == ModeClose && m.closeTree != nil {
-		return m.closeCursorSHA()
+		return m.closeCursorSHAs()
 	}
+	if sha := m.previewSHA(); sha != "" {
+		return []string{sha}
+	}
+	return nil
+}
+
+// previewSHA returns the ScrollbackSHA snapshot mode's preview is showing, or
+// "" when it is not showing scrollback — Tab has to have reached the tree.
+func (m PickerModel) previewSHA() string {
 	if m.focus != focusTree {
 		return ""
 	}
@@ -784,34 +800,32 @@ func (m PickerModel) previewSHA() string {
 	return p.ScrollbackSHA
 }
 
-// closeCursorSHA resolves the cursor's close context and returns its scrollback
-// hash.
-func (m PickerModel) closeCursorSHA() string {
+// closeCursorContext resolves the close context the cursor sits on, or the
+// zero value when it sits on a section header or out of range.
+func (m PickerModel) closeCursorContext() CloseContext {
 	vis := m.CloseVisible()
 	if m.cursor < 0 || m.cursor >= len(vis) {
-		return ""
+		return CloseContext{}
 	}
-	return closeSHAFor(m.CloseContextFor(vis[m.cursor].EventID))
+	return m.CloseContextFor(vis[m.cursor].EventID)
 }
 
-// closeSHAFor returns the scrollback hash of the pane cc's close took down, or
-// "" when cc is not a pane-scoped close. Only a pane close has one pane's worth
-// of output to show; a window or session close is previewed as a layout map
-// instead.
-func closeSHAFor(cc CloseContext) string {
-	if cc.Placement.Scope != "pane" || cc.Placement.PaneID == "" {
-		return ""
-	}
-	w := closePreviewWindow(cc)
+// closeCursorSHAs returns the scrollback hashes of every pane the cursor's
+// close took down. All of them are scheduled even when the panel is too short
+// to draw every block — loading a hash the frame does not show costs a read,
+// where missing one leaves that block hanging on "(loading scrollback…)".
+func (m PickerModel) closeCursorSHAs() []string {
+	w := closePreviewWindow(m.closeCursorContext())
 	if w == nil {
-		return ""
+		return nil
 	}
+	out := make([]string, 0, len(w.Panes))
 	for i := range w.Panes {
-		if w.Panes[i].ID == cc.Placement.PaneID {
-			return w.Panes[i].ScrollbackSHA
+		if sha := w.Panes[i].ScrollbackSHA; sha != "" {
+			out = append(out, sha)
 		}
 	}
-	return ""
+	return out
 }
 
 // ensureManifest parses + builds + decorates the tree for the cursor's event,

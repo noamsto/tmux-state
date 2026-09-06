@@ -10,6 +10,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/noamsto/tmux-remux/internal/panemap"
@@ -117,7 +118,20 @@ func (m PickerModel) renderPreview(width int) string {
 	return frame.Render(previewWindow(string(content), innerWidth, innerHeight, m.previewScroll, m.previewScrollX))
 }
 
-// renderClosePreview draws the panel for whatever close row the cursor is on.
+// closeRail is the gutter glyph drawn down the left edge of every content row
+// of a pane's block. Captured scrollback prints its own horizontal rules and
+// box-drawn status bars, so chrome that is only a thin rule reads as content;
+// the rail is trustworthy instead because content is inset past it and
+// truncated to the remaining width, and so can never reach that column.
+const closeRail = "▌"
+
+// closeHeaderLines is the height of the close preview's header. Fixed, so the
+// body's budget can be computed without rendering it.
+const closeHeaderLines = 2
+
+// renderClosePreview draws the panel for whatever close row the cursor is on:
+// a two-line header naming the close, then the scrollback of every pane it
+// took down, stacked one block per pane.
 func (m PickerModel) renderClosePreview(width int) string {
 	frameHeight := m.panelFrameHeight()
 	innerHeight := m.previewInnerHeight()
@@ -135,55 +149,160 @@ func (m PickerModel) renderClosePreview(width int) string {
 	if n.EventID == 0 {
 		return frame.Render(rowDim.Render("(a section — ↑↓ to reach a close)"))
 	}
-
 	cc := m.CloseContextFor(n.EventID)
-	if sha := closeSHAFor(cc); sha != "" {
-		if err := m.scrollbackErrors[sha]; err != nil {
-			return frame.Render(footerWarn.Render("(scrollback file missing: " + err.Error() + ")"))
+
+	// A lipgloss frame pads short content but does not clip overflow — once the
+	// body has more lines than fit, MaxHeight hard-truncates the line list,
+	// dropping the closing border row rather than the excess. So the header is
+	// clipped to the interior and the body only ever gets what is left.
+	lines := closePreviewHeader(cc, innerWidth, time.Now(), n.Ts)
+	if len(lines) > innerHeight {
+		lines = lines[:innerHeight]
+	}
+	lines = append(lines, m.closePreviewBody(cc, innerWidth, innerHeight-len(lines))...)
+	return frame.Render(strings.Join(lines, "\n"))
+}
+
+// closePreviewHeader names what this close was and when it happened, e.g.
+//
+//	halo-nix-amd-ai:1 · nix-amd-ai
+//	window close · 2 panes · closed 2d ago
+func closePreviewHeader(cc CloseContext, innerWidth int, now time.Time, ts int64) []string {
+	p := cc.Placement
+	title := p.Session
+	if p.Scope != "session" {
+		title = fmt.Sprintf("%s:%d · %s", p.Session, p.WindowIndex, snapshot.StripFormat(p.WindowName))
+	}
+	size := countPhrase(1, "pane")
+	switch p.Scope {
+	case "session":
+		size = countPhrase(countWindows(cc.SubManifest), "window")
+	case "window":
+		n := p.PaneCount
+		if w := closePreviewWindow(cc); n == 0 && w != nil {
+			n = len(w.Panes)
 		}
-		if content, ok := m.scrollbacks[sha]; ok {
-			return frame.Render(previewWindow(string(content), innerWidth, innerHeight, m.previewScroll, m.previewScrollX))
-		}
-		if m.loadingSHAs[sha] {
-			return frame.Render(rowDim.Render("(loading scrollback…)"))
-		}
-		// Falling through to the map here would swap the panel's content type
-		// the moment a load lands.
-		return frame.Render(rowDim.Render("(scrollback pending)"))
+		size = countPhrase(n, "pane")
+	}
+	sub := strings.Join([]string{p.Scope + " close", size, "closed " + humanAge(now.Sub(time.UnixMilli(ts)))}, " · ")
+	return []string{
+		previewHeader.Render(ansi.Truncate(title, innerWidth, "…")),
+		rowDim.Render(ansi.Truncate(sub, innerWidth, "…")),
+	}
+}
+
+// closePreviewBody stacks one block per pane the close took down into height
+// rows, or says so when the close captured nothing.
+func (m PickerModel) closePreviewBody(cc CloseContext, innerWidth, height int) []string {
+	if height < 1 {
+		return nil
 	}
 	w := closePreviewWindow(cc)
-	sentence := restoreSentence(cc.Placement, cc.SubManifest, time.Now(), n.Ts)
-	// A lipgloss frame pads short content but does not clip overflow — once the
-	// body already has more lines than fit, MaxHeight hard-truncates the line
-	// list, which drops the closing border row rather than the excess content.
-	// So the body must never exceed innerHeight lines: the map yields its rows
-	// to the sentence, which is truncated only once it alone does not fit.
-	if len(sentence) > innerHeight {
-		sentence = sentence[:innerHeight]
+	if w == nil || len(w.Panes) == 0 {
+		return []string{rowDim.Render(ansi.Truncate("(nothing captured for this close)", innerWidth, "…"))}
 	}
-	remaining := innerHeight - len(sentence)
+	heights := closeBlockHeights(len(w.Panes), height)
+	if len(heights) == 0 {
+		// One row left: a label bar alone still says whose output is missing.
+		return []string{closePaneLabel(w.Panes[0], 0, len(w.Panes), innerWidth)}
+	}
+	var out []string
+	for i, h := range heights {
+		out = append(out, m.closePaneBlock(w.Panes[i], i, len(w.Panes), innerWidth, h)...)
+	}
+	return out
+}
+
+// closeBlockHeights divides body rows between the panes a close took down,
+// giving every block a label bar plus at least one content row. Panes past
+// what fits get no block — the label bar's "k of n" marker is what says the
+// list is longer than the panel.
+func closeBlockHeights(panes, body int) []int {
+	blocks := panes
+	if fits := body / 2; blocks > fits {
+		blocks = fits
+	}
+	if blocks < 1 {
+		return nil
+	}
+	base, extra := body/blocks, body%blocks
+	out := make([]int, blocks)
+	for i := range out {
+		out[i] = base
+		if i < extra {
+			out[i]++
+		}
+	}
+	return out
+}
+
+// closePaneBlock renders one pane's slot: its label bar, then exactly height-1
+// content rows each led by the block's rail.
+func (m PickerModel) closePaneBlock(p snapshot.Pane, i, total, innerWidth, height int) []string {
+	rail := closeRailStyles[i%len(closeRailStyles)].Render(closeRail)
+	contentWidth := innerWidth - 1
+	if contentWidth < 1 {
+		contentWidth = 1
+	}
+	out := make([]string, 0, height)
+	out = append(out, closePaneLabel(p, i, total, innerWidth))
+	for _, l := range m.closePaneContent(p, contentWidth, height-1) {
+		// Concatenated, never nested: lipgloss strips the ESC bytes out of
+		// pre-styled input, so wrapping coloured scrollback in the rail's
+		// style would flatten it.
+		out = append(out, rail+l)
+	}
+	return out
+}
+
+// closePaneLabel is the filled bar introducing a pane's block: which pane it
+// was, and where it sits in the run of panes this close took down.
+func closePaneLabel(p snapshot.Pane, i, total, innerWidth int) string {
+	cmd := p.Command
+	if cmd == "" {
+		cmd = "(none)"
+	}
+	left := fmt.Sprintf("%d · %s", p.Index, cmd)
+	right := fmt.Sprintf("%d of %d", i+1, total)
+	line := left
+	if gap := innerWidth - lipgloss.Width(left) - lipgloss.Width(right); gap >= 1 {
+		line = left + strings.Repeat(" ", gap) + right
+	}
+	return closeLabelStyles[i%len(closeLabelStyles)].Width(innerWidth).Render(ansi.Truncate(line, innerWidth, "…"))
+}
+
+// closePaneContent returns exactly height rows of a pane's scrollback, or the
+// one-line reason there is none, padded so the block's rail runs its full
+// height. Every row is already cut to width: the caller prefixes the rail and
+// content must not be able to reach that column.
+func (m PickerModel) closePaneContent(p snapshot.Pane, width, height int) []string {
+	if height < 1 {
+		return nil
+	}
+	note := func(style lipgloss.Style, text string) []string {
+		return []string{style.Render(ansi.Truncate(text, width, "…"))}
+	}
 	var lines []string
-	switch {
-	case w == nil:
-		if remaining >= 1 {
-			lines = []string{rowDim.Render("(nothing captured for this close)")}
+	switch sha := p.ScrollbackSHA; {
+	case sha == "":
+		lines = note(rowDim, "(no scrollback captured for this pane)")
+	case m.scrollbackErrors[sha] != nil:
+		lines = note(footerWarn, "(scrollback file missing: "+m.scrollbackErrors[sha].Error()+")")
+	default:
+		content, ok := m.scrollbacks[sha]
+		switch {
+		case ok:
+			lines = strings.Split(previewWindow(string(content), width, height, m.previewScroll, m.previewScrollX), "\n")
+		case m.loadingSHAs[sha]:
+			lines = note(rowDim, "(loading scrollback…)")
+		default:
+			// PreviewCmd schedules on the next key event.
+			lines = note(rowDim, "(scrollback pending)")
 		}
-	case remaining >= 2:
-		// renderWindowMap always emits a title line plus at least one map line
-		// (art, or its own "no layout" fallback), so it needs 2 rows of budget
-		// before it's called — at remaining==1 it would overflow by itself.
-		if art := m.renderWindowMap(w, innerWidth, remaining); art != "" {
-			lines = strings.Split(art, "\n")
-		} else {
-			lines = []string{rowDim.Render("(no layout captured for this window)")}
-		}
-	case remaining == 1:
-		lines = []string{rowDim.Render("(no layout captured for this window)")}
 	}
-	for _, line := range sentence {
-		lines = append(lines, rowDim.Render(ansi.Truncate(line, innerWidth, "…")))
-	}
-	return frame.Render(strings.Join(lines, "\n"))
+	out := make([]string, height)
+	copy(out, lines)
+	return out
 }
 
 // closePreviewWindow returns the window the preview should draw: the one the
@@ -277,6 +396,9 @@ func (m PickerModel) previewInnerHeight() int {
 // previewMaxScroll returns the largest valid m.previewScroll for the current
 // pane's scrollback. Used to clamp Alt+K scroll-up at the top of the buffer.
 func (m PickerModel) previewMaxScroll(innerHeight int) int {
+	if m.mode == ModeClose && m.closeTree != nil {
+		return m.closeMaxScroll()
+	}
 	sha := m.previewSHA()
 	if sha == "" {
 		return 0
@@ -290,6 +412,30 @@ func (m PickerModel) previewMaxScroll(innerHeight int) int {
 		return 0
 	}
 	return total - innerHeight
+}
+
+// closeMaxScroll is the largest valid previewScroll for the stacked close
+// preview. One scroll offset drives every block, so the limit is the tallest
+// overflow across them — stopping at the shortest would strand the deepest
+// pane's earliest output out of reach.
+func (m PickerModel) closeMaxScroll() int {
+	cc := m.closeCursorContext()
+	w := closePreviewWindow(cc)
+	if w == nil {
+		return 0
+	}
+	worst := 0
+	for i, h := range closeBlockHeights(len(w.Panes), m.previewInnerHeight()-closeHeaderLines) {
+		content, ok := m.scrollbacks[w.Panes[i].ScrollbackSHA]
+		if !ok {
+			continue
+		}
+		total := strings.Count(strings.TrimRight(string(content), "\n"), "\n") + 1
+		if over := total - (h - 1); over > worst {
+			worst = over
+		}
+	}
+	return worst
 }
 
 // loadScrollbackCmd returns a tea.Cmd that reads the scrollback for sha off
@@ -342,31 +488,6 @@ func (m PickerModel) renderWindowMap(w *snapshot.Window, innerWidth, innerHeight
 	}
 	art := panemap.Render(g, innerWidth, innerHeight-1, label, marked)
 	return rowDim.Render(ansi.Truncate(title, innerWidth, "…")) + "\n" + art
-}
-
-// restoreSentence states what Enter on this close would do, in the terms the
-// restore path actually honours — a window goes back to its original index.
-func restoreSentence(p ClosePlacement, man snapshot.Manifest, now time.Time, ts int64) []string {
-	var out []string
-	switch p.Scope {
-	case "window":
-		out = append(out,
-			"↵ reopens window "+snapshot.StripFormat(p.WindowName),
-			fmt.Sprintf("  in %s at index %d", p.Session, p.WindowIndex),
-		)
-	case "pane":
-		out = append(out, fmt.Sprintf("↵ reopens a pane in %s:%d", p.Session, p.WindowIndex))
-	case "session":
-		out = append(out, fmt.Sprintf("↵ reopens session %s (%s)", p.Session, countPhrase(countWindows(man), "window")))
-	default:
-		return nil
-	}
-
-	age := "closed " + humanAge(now.Sub(time.UnixMilli(ts)))
-	if p.PaneCount > 0 {
-		age = countPhrase(p.PaneCount, "pane") + " · " + age
-	}
-	return append(out, age)
 }
 
 // humanAge renders a duration as the coarsest unit that still reads true.
