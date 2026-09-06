@@ -202,6 +202,7 @@ func (m PickerModel) closePreviewBody(cc CloseContext, innerWidth, height int) [
 	if w == nil || len(w.Panes) == 0 {
 		return []string{rowDim.Render(ansi.Truncate("(nothing captured for this close)", innerWidth, "…"))}
 	}
+	skipped := cc.SubManifest.ScrollbackSkipped
 	fixed := make([]bool, len(w.Panes))
 	for i, p := range w.Panes {
 		fixed[i] = m.closePaneIsFixed(p)
@@ -213,7 +214,7 @@ func (m PickerModel) closePreviewBody(cc CloseContext, innerWidth, height int) [
 	}
 	var out []string
 	for i, h := range heights {
-		out = append(out, m.closePaneBlock(w.Panes[i], i, len(w.Panes), innerWidth, h)...)
+		out = append(out, m.closePaneBlock(w.Panes[i], i, len(w.Panes), innerWidth, h, skipped)...)
 	}
 	return out
 }
@@ -278,7 +279,7 @@ func closeBlockHeights(fixed []bool, body int) []int {
 
 // closePaneBlock renders one pane's slot: its label bar, then exactly height-1
 // content rows each led by the block's rail.
-func (m PickerModel) closePaneBlock(p snapshot.Pane, i, total, innerWidth, height int) []string {
+func (m PickerModel) closePaneBlock(p snapshot.Pane, i, total, innerWidth, height int, skipped bool) []string {
 	rail := closeRailStyles[i%len(closeRailStyles)].Render(closeRail)
 	contentWidth := innerWidth - 1
 	if contentWidth < 1 {
@@ -286,7 +287,7 @@ func (m PickerModel) closePaneBlock(p snapshot.Pane, i, total, innerWidth, heigh
 	}
 	out := make([]string, 0, height)
 	out = append(out, closePaneLabel(p, i, total, innerWidth))
-	for _, l := range m.closePaneContent(p, contentWidth, height-1) {
+	for _, l := range m.closePaneContent(p, contentWidth, height-1, skipped) {
 		// Concatenated, never nested: lipgloss strips the ESC bytes out of
 		// pre-styled input, so wrapping coloured scrollback in the rail's
 		// style would flatten it.
@@ -315,7 +316,7 @@ func closePaneLabel(p snapshot.Pane, i, total, innerWidth int) string {
 // one-line reason there is none, padded so the block's rail runs its full
 // height. Every row is already cut to width: the caller prefixes the rail and
 // content must not be able to reach that column.
-func (m PickerModel) closePaneContent(p snapshot.Pane, width, height int) []string {
+func (m PickerModel) closePaneContent(p snapshot.Pane, width, height int, skipped bool) []string {
 	if height < 1 {
 		return nil
 	}
@@ -324,6 +325,8 @@ func (m PickerModel) closePaneContent(p snapshot.Pane, width, height int) []stri
 	}
 	var lines []string
 	switch sha := p.ScrollbackSHA; {
+	case sha == "" && skipped:
+		lines = note(rowDim, "(scrollback skipped — saved within min_save_interval)")
 	case sha == "":
 		lines = note(rowDim, "(no scrollback captured for this pane)")
 	case m.scrollbackErrors[sha] != nil:

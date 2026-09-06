@@ -1304,6 +1304,39 @@ func TestRenderClosePreview_PaneWithoutScrollbackSaysSo(t *testing.T) {
 	}
 }
 
+// A pane the close took down whose sub-manifest carries ScrollbackSkipped
+// reads the throttle explanation, not the unqualified no-capture message.
+func TestRenderClosePreview_ScrollbackSkippedSaysSo(t *testing.T) {
+	applyTheme(NewTheme())
+	sub := snapshot.Manifest{V: 1, ScrollbackSkipped: true, Sessions: []snapshot.Session{{
+		Name: "halo-nix-amd-ai",
+		Windows: []snapshot.Window{{
+			Index: 1, Name: "nix-amd-ai", ID: "@1",
+			Layout: "1cb4,80x24,0,0[80x24,0,0,0]",
+			Panes:  []snapshot.Pane{{Index: 0, ID: "%0", Command: "fish"}},
+		}},
+	}}}
+	ev := store.Event{ID: 7, Ts: time.Now().Add(-1 * time.Hour).UnixMilli(), Kind: "window-unlinked"}
+	ctxs := map[int64]CloseContext{7: {
+		Label:       "w",
+		Placement:   ClosePlacement{Session: "halo-nix-amd-ai", WindowIndex: 1, WindowName: "nix-amd-ai", Scope: "window", PaneCount: 1},
+		SubManifest: sub,
+	}}
+	m := NewPickerModel(ModeClose, []store.Event{ev}, nil, nil)
+	m.SetCloseContexts(ctxs)
+	m.SetCloseRows(BuildCloseList([]store.Event{ev}, ctxs, "halo-nix-amd-ai"))
+	m.Bootstrap()
+	m.width, m.height = 120, 30
+
+	got := stripANSI(m.renderClosePreview(120))
+	if !strings.Contains(got, "min_save_interval") {
+		t.Errorf("expected throttle explanation, got:\n%s", got)
+	}
+	if strings.Contains(got, "no scrollback captured") {
+		t.Errorf("got the unqualified no-capture message instead of the throttle explanation:\n%s", got)
+	}
+}
+
 // A pane with no captured scrollback gets a block just tall enough for its
 // note — one label row, one content row — not a share of the whole panel.
 // The rail must not run empty down the rows that frees up.
