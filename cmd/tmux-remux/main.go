@@ -693,10 +693,12 @@ func buildCloseContexts(ctx context.Context, db *store.Store, evs []store.Event)
 		if item == nil {
 			continue
 		}
+		sub := item.SubManifest(prior.Host, prior.SavedAt)
+		sub.ScrollbackSkipped = prior.ScrollbackSkipped
 		out[ev.ID] = picker.CloseContext{
 			Label:       item.Describe(),
 			Placement:   placementFor(closeMan, item),
-			SubManifest: item.SubManifest(prior.Host, prior.SavedAt),
+			SubManifest: sub,
 		}
 	}
 	return out

@@ -3,7 +3,10 @@ package snapshot_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,9 +19,13 @@ import (
 type captureClient struct {
 	*fakeClient
 	captured map[string][]byte
+	errs     map[string]error
 }
 
 func (c *captureClient) CapturePane(_ context.Context, target string) ([]byte, error) {
+	if err, ok := c.errs[target]; ok {
+		return nil, err
+	}
 	if v, ok := c.captured[target]; ok {
 		return v, nil
 	}
@@ -66,6 +73,81 @@ func TestSaveInsertsEventAndScrollbacks(t *testing.T) {
 	defer rows.Close()
 	if !rows.Next() {
 		t.Error("expected at least one event_scrollback row")
+	}
+}
+
+func TestSaveCapturePaneErrorIsNonFatal(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	scrollDir := filepath.Join(dir, "scrollbacks")
+	ctx := context.Background()
+
+	db, err := store.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	sb := scrollback.New(scrollDir)
+
+	cc := &captureClient{
+		fakeClient: &fakeClient{
+			sessions: []tmux.SessionRow{{Name: "s1", LastAttached: 100}},
+			windows: []tmux.WindowRow{
+				{Session: "s1", Index: 1, Name: "w1", ID: "@1"},
+				{Session: "s1", Index: 2, Name: "w2", ID: "@2"},
+			},
+			panes: []tmux.PaneRow{
+				{Session: "s1", WindowIndex: 1, PaneIndex: 1, Command: "bash", ID: "%1"},
+				{Session: "s1", WindowIndex: 2, PaneIndex: 1, Command: "bash", ID: "%2"},
+			},
+		},
+		errs: map[string]error{"s1:2.1": errors.New("can't find pane: 1")},
+	}
+
+	var logs []string
+	saver := snapshot.NewSaver(db, sb, cc, snapshot.SaverOptions{
+		Host: "h", CaptureScrollback: true, MinSaveInterval: 0,
+		Logf: func(format string, a ...any) {
+			logs = append(logs, fmt.Sprintf(format, a...))
+		},
+	})
+
+	if err := saver.Save(ctx, "test"); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	ev, err := db.LatestSnapshot(ctx)
+	if err != nil || ev == nil {
+		t.Fatalf("LatestSnapshot = %v, %v", ev, err)
+	}
+	var m snapshot.Manifest
+	if err := json.Unmarshal([]byte(ev.ManifestJSON), &m); err != nil {
+		t.Fatal(err)
+	}
+	if len(m.Sessions) != 1 || len(m.Sessions[0].Windows) != 2 {
+		t.Fatalf("manifest has %d windows, want 2", len(m.Sessions[0].Windows))
+	}
+	for _, w := range m.Sessions[0].Windows {
+		switch w.Index {
+		case 1:
+			if w.Panes[0].ScrollbackSHA == "" {
+				t.Error("w1 pane has empty ScrollbackSHA, want non-empty")
+			}
+		case 2:
+			if w.Panes[0].ScrollbackSHA != "" {
+				t.Errorf("w2 pane has ScrollbackSHA %q, want empty (capture-pane errored)", w.Panes[0].ScrollbackSHA)
+			}
+		}
+	}
+
+	found := false
+	for _, l := range logs {
+		if strings.Contains(l, "capture-pane") && strings.Contains(l, "s1:2.1") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("logs = %v, want an entry mentioning capture-pane and s1:2.1", logs)
 	}
 }
 
@@ -150,6 +232,9 @@ func TestSaveThrottleNeverDropsANewWindow(t *testing.T) {
 	}
 	if linked != 0 {
 		t.Errorf("throttled snapshot linked %d scrollbacks, want 0", linked)
+	}
+	if !m.ScrollbackSkipped {
+		t.Error("throttled snapshot manifest has ScrollbackSkipped = false, want true")
 	}
 
 	// A pure churn change (same entities, different command) stays throttled.
