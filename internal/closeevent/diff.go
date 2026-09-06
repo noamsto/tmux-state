@@ -25,6 +25,10 @@ type CloseManifest struct {
 	WindowID    string    `json:"window_id"`
 	PaneID      string    `json:"pane_id"`
 	Index       IndexPost `json:"index"`
+	// Resolved is the entity the close resolved to at capture time. Nil on
+	// events recorded before it was stored, which fall back to the snapshot
+	// diff via FindClosed.
+	Resolved *ResolvedClose `json:"resolved,omitempty"`
 }
 
 // IndexPost holds tmux's list-windows and list-panes output queried right
@@ -46,18 +50,29 @@ func ParseManifest(s string) (CloseManifest, error) {
 	return m, err
 }
 
-// ClosedItem identifies the entity lost in a close event, recovered by diffing
-// the most recent snapshot from before the event against the event's
-// post-close index. SessionName is always populated (root of the lost entity).
+// ClosedItem identifies the entity lost in a close event, recovered either by
+// diffing the most recent snapshot from before the event against the event's
+// post-close index, or from the copy embedded at capture time when no such
+// snapshot survives. SessionName is always populated (root of the lost entity).
 // A session-closed sets Session; a window-unlinked sets Window; a pane-died
 // sets Pane (the lost pane) AND Window (its parent, needed to split it back in
 // or recreate the window).
 type ClosedItem struct {
-	Session     *snapshot.Session
-	Window      *snapshot.Window
-	Pane        *snapshot.Pane
-	SessionName string
-	WindowIndex int // 0 when the whole session was closed
+	Session     *snapshot.Session `json:"session,omitempty"`
+	Window      *snapshot.Window  `json:"window,omitempty"`
+	Pane        *snapshot.Pane    `json:"pane,omitempty"`
+	SessionName string            `json:"session_name"`
+	WindowIndex int               `json:"window_index"` // 0 when the whole session was closed
+}
+
+// ResolvedClose is the entity a close event resolved to at capture time,
+// embedded in the event's manifest so the event no longer needs a surviving
+// snapshot to be recoverable. SavedAt stands in for the prior snapshot's
+// SavedAt in restore paths that key on it — the host itself isn't stored
+// here, since events.host already carries it.
+type ResolvedClose struct {
+	Item    ClosedItem `json:"item"`
+	SavedAt int64      `json:"saved_at,omitempty"`
 }
 
 // Describe returns a short human label like
@@ -132,6 +147,51 @@ func FindClosed(prior snapshot.Manifest, post CloseManifest, kind string) *Close
 		return findClosedPane(prior, post)
 	}
 	return nil
+}
+
+// Resolve returns the entity a close event refers to: the snapshot diff when
+// prior resolves it, else the entity embedded at capture time. The
+// snapshot-first ordering is deliberate: a throttled save writes a snapshot
+// whose panes carry no ScrollbackSHA, so preferring the embedded copy could
+// lose scrollback that a surviving snapshot still has.
+//
+// When an embedded entity exists, the diff is trusted only if prior is
+// id-aware for this kind: an id-unaware prior falls through FindClosed's
+// positional fallback, which under renumber-windows can return a SURVIVING
+// entity — shadowing the correct embedded copy with a wrong guess. Events
+// with no embedded entity have nothing better to fall back to, so the diff
+// result stands.
+func Resolve(prior snapshot.Manifest, post CloseManifest, kind string) (*ClosedItem, int64, bool) {
+	item := FindClosed(prior, post, kind)
+	if item != nil && (post.Resolved == nil || priorIsIDAwareFor(prior, kind)) {
+		return item, prior.SavedAt, true
+	}
+	if post.Resolved == nil {
+		return nil, 0, false
+	}
+	// Deserialisation-boundary check: this is the first time ClosedItem
+	// round-trips through events.manifest_json. In-process constructors
+	// always pair Pane with Window, but nothing enforces that across JSON,
+	// and SubManifest/buildRestorePlan dereference Window unconditionally
+	// once Pane is set — so an item that fails the pairing isn't resolvable.
+	embedded := post.Resolved.Item
+	if embedded.Pane != nil && embedded.Window == nil {
+		return nil, 0, false
+	}
+	return &embedded, post.Resolved.SavedAt, true
+}
+
+// priorIsIDAwareFor reports whether prior is id-aware for the given close
+// kind — i.e. whether FindClosed could have taken its id branch rather than
+// its positional fallback.
+func priorIsIDAwareFor(prior snapshot.Manifest, kind string) bool {
+	switch kind {
+	case "pane-died":
+		return priorHasPaneIDs(prior)
+	case "window-unlinked":
+		return priorHasWindowIDs(prior)
+	}
+	return true
 }
 
 func findClosedSession(prior snapshot.Manifest, post CloseManifest) *ClosedItem {

@@ -86,3 +86,54 @@ func TestBuildCloseContextsPropagatesScrollbackSkipped(t *testing.T) {
 		t.Error("CloseContext.SubManifest.ScrollbackSkipped = false, want true (must propagate from the prior snapshot)")
 	}
 }
+
+// An embedded entity resolved via the capture-time fallback can carry real
+// scrollback even though the freshly looked-up prior snapshot was throttled
+// — they can come from different snapshots. The sub-manifest must reflect
+// the embedded entity's own scrollback, not prior's throttle status.
+func TestBuildCloseContextsScrollbackSkippedReflectsResolvedItem(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// Throttled, and empty of sessions — the diff can never resolve this
+	// close against it, forcing Resolve onto the embedded path.
+	snap := snapshot.Manifest{V: 1, Host: "h", SavedAt: 1000, ScrollbackSkipped: true}
+	snapJSON, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.InsertEvent(ctx, store.Event{
+		Ts: 1000, Kind: "snapshot", Scope: "server", Host: "h", ManifestJSON: string(snapJSON),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	embedded := closeevent.ClosedItem{
+		SessionName: "s1",
+		WindowIndex: 1,
+		Window:      &snapshot.Window{Index: 1, Panes: []snapshot.Pane{{Index: 1, ScrollbackSHA: "deadbeef"}}},
+		Pane:        &snapshot.Pane{Index: 1, ScrollbackSHA: "deadbeef"},
+	}
+	closeMan := closeevent.CloseManifest{
+		PaneID:   "%1",
+		Resolved: &closeevent.ResolvedClose{Item: embedded, SavedAt: 500},
+	}
+	closeJSON, err := json.Marshal(closeMan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evs := []store.Event{{ID: 7, Ts: 2000, Kind: "pane-died", Host: "h", ManifestJSON: string(closeJSON)}}
+
+	ctxs := buildCloseContexts(ctx, db, evs)
+	cc, ok := ctxs[7]
+	if !ok {
+		t.Fatalf("no CloseContext resolved for the close event; ctxs = %+v", ctxs)
+	}
+	if cc.SubManifest.ScrollbackSkipped {
+		t.Error("CloseContext.SubManifest.ScrollbackSkipped = true, want false: the embedded entity carries real scrollback")
+	}
+}

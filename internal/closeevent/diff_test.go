@@ -321,6 +321,221 @@ func TestFindClosed_SessionClosed_UnknownNameWithOneCandidate(t *testing.T) {
 	}
 }
 
+func TestResolve_SnapshotWinsOverEmbedded(t *testing.T) {
+	// Both a snapshot match and an embedded entity are present. prior is
+	// id-aware and post.WindowID pins the id match, so the diff is trusted
+	// and must win (see Resolve's doc comment for why).
+	prior := snapshot.Manifest{
+		SavedAt: 100,
+		Sessions: []snapshot.Session{
+			{Name: "s", Windows: []snapshot.Window{
+				{Index: 1, Name: "keep", ID: "@1"},
+				{Index: 2, Name: "from-snapshot", ID: "@2"},
+			}},
+		},
+	}
+	post := closeevent.CloseManifest{
+		WindowID: "@2",
+		Index: closeevent.IndexPost{
+			Windows: []tmux.WindowRow{{Session: "s", Index: 1, Name: "keep"}},
+		},
+		Resolved: &closeevent.ResolvedClose{
+			Item:    closeevent.ClosedItem{SessionName: "s", WindowIndex: 2, Window: &snapshot.Window{Index: 2, Name: "from-embedded"}},
+			SavedAt: 200,
+		},
+	}
+	item, savedAt, ok := closeevent.Resolve(prior, post, "window-unlinked")
+	if !ok {
+		t.Fatal("expected resolved, got false")
+	}
+	if item.Window == nil || item.Window.Name != "from-snapshot" {
+		t.Errorf("got window %+v, want the snapshot-diff result", item.Window)
+	}
+	if savedAt != 100 {
+		t.Errorf("got savedAt=%d, want the prior snapshot's SavedAt=100", savedAt)
+	}
+}
+
+func TestResolve_IDUnawarePriorFallsBackToEmbeddedOverPositionalGuess(t *testing.T) {
+	// prior has no window IDs (a pre-id snapshot). renumber-windows shifted
+	// "survivor" down from index 2 to index 1 after "closed-me" (index 1)
+	// shut, so the positional fallback finds index 2 "missing" and returns
+	// the SURVIVING window under a wrong guess. The embedded entity —
+	// captured at close time — knows the real one; Resolve must prefer it.
+	prior := snapshot.Manifest{
+		SavedAt: 100,
+		Sessions: []snapshot.Session{
+			{Name: "s", Windows: []snapshot.Window{
+				{Index: 1, Name: "closed-me"},
+				{Index: 2, Name: "survivor"},
+			}},
+		},
+	}
+	post := closeevent.CloseManifest{
+		Index: closeevent.IndexPost{
+			Windows: []tmux.WindowRow{{Session: "s", Index: 1, Name: "survivor"}},
+		},
+		Resolved: &closeevent.ResolvedClose{
+			Item:    closeevent.ClosedItem{SessionName: "s", WindowIndex: 1, Window: &snapshot.Window{Index: 1, Name: "closed-me"}},
+			SavedAt: 200,
+		},
+	}
+	item, savedAt, ok := closeevent.Resolve(prior, post, "window-unlinked")
+	if !ok {
+		t.Fatal("expected resolved, got false")
+	}
+	if item.Window == nil || item.Window.Name != "closed-me" {
+		t.Errorf("got window %+v, want the embedded entity closed-me, not the positional guess survivor", item.Window)
+	}
+	if savedAt != 200 {
+		t.Errorf("got savedAt=%d, want the embedded ResolvedClose's SavedAt=200", savedAt)
+	}
+}
+
+func TestResolve_IDUnawarePriorNoEmbeddedStillUsesPositionalGuess(t *testing.T) {
+	// Same id-unaware prior/post as above, but the event carries no embedded
+	// entity (recorded before Resolved existed). Resolve must fall back to
+	// the same positional guess exactly as it always has — no regression for
+	// the pre-existing rows.
+	prior := snapshot.Manifest{
+		SavedAt: 100,
+		Sessions: []snapshot.Session{
+			{Name: "s", Windows: []snapshot.Window{
+				{Index: 1, Name: "closed-me"},
+				{Index: 2, Name: "survivor"},
+			}},
+		},
+	}
+	post := closeevent.CloseManifest{
+		Index: closeevent.IndexPost{
+			Windows: []tmux.WindowRow{{Session: "s", Index: 1, Name: "survivor"}},
+		},
+	}
+	item, savedAt, ok := closeevent.Resolve(prior, post, "window-unlinked")
+	if !ok {
+		t.Fatal("expected resolved, got false")
+	}
+	if item.Window == nil || item.Window.Name != "survivor" {
+		t.Errorf("got window %+v, want the positional guess survivor (index 2)", item.Window)
+	}
+	if savedAt != 100 {
+		t.Errorf("got savedAt=%d, want the prior snapshot's SavedAt=100", savedAt)
+	}
+}
+
+func TestResolve_EmbeddedPaneWithoutWindowIsUnresolvable(t *testing.T) {
+	// Deserialisation boundary: a manifest_json row with "pane" but no
+	// "window" unmarshals cleanly into ClosedItem, but SubManifest and
+	// buildRestorePlan dereference Window unconditionally once Pane is set.
+	// Resolve must report this unresolvable rather than handing it to callers.
+	var prior snapshot.Manifest
+	post := closeevent.CloseManifest{
+		Resolved: &closeevent.ResolvedClose{
+			Item:    closeevent.ClosedItem{SessionName: "s", Pane: &snapshot.Pane{Index: 1, Command: "vim"}},
+			SavedAt: 200,
+		},
+	}
+	item, savedAt, ok := closeevent.Resolve(prior, post, "pane-died")
+	if ok {
+		t.Errorf("expected unresolvable, got item=%+v savedAt=%d", item, savedAt)
+	}
+	if item != nil {
+		t.Errorf("expected nil item, got %+v", item)
+	}
+}
+
+func TestResolve_FallsBackToEmbeddedWhenSnapshotMisses(t *testing.T) {
+	// FindClosed returns nil against a non-empty prior (the window isn't in
+	// it), so Resolve must fall back to the embedded entity.
+	prior := snapshot.Manifest{
+		SavedAt: 100,
+		Sessions: []snapshot.Session{
+			{Name: "s", Windows: []snapshot.Window{{Index: 1, Name: "keep"}}},
+		},
+	}
+	post := closeevent.CloseManifest{
+		Index: closeevent.IndexPost{
+			Windows: []tmux.WindowRow{{Session: "s", Index: 1, Name: "keep"}},
+		},
+		Resolved: &closeevent.ResolvedClose{
+			Item:    closeevent.ClosedItem{SessionName: "s", WindowIndex: 2, Window: &snapshot.Window{Index: 2, Name: "from-embedded"}},
+			SavedAt: 200,
+		},
+	}
+	item, savedAt, ok := closeevent.Resolve(prior, post, "window-unlinked")
+	if !ok {
+		t.Fatal("expected resolved, got false")
+	}
+	if item.Window == nil || item.Window.Name != "from-embedded" {
+		t.Errorf("got window %+v, want the embedded result", item.Window)
+	}
+	if savedAt != 200 {
+		t.Errorf("got savedAt=%d, want the embedded ResolvedClose's SavedAt=200", savedAt)
+	}
+}
+
+func TestResolve_ZeroPriorFallsBackToEmbedded(t *testing.T) {
+	// A zero snapshot.Manifest is a legal prior (e.g. no snapshot ever
+	// existed); FindClosed returns nil on it and Resolve must still recover
+	// the embedded entity.
+	var prior snapshot.Manifest
+	post := closeevent.CloseManifest{
+		Index: closeevent.IndexPost{},
+		Resolved: &closeevent.ResolvedClose{
+			Item:    closeevent.ClosedItem{SessionName: "s", WindowIndex: 2, Window: &snapshot.Window{Index: 2, Name: "from-embedded"}},
+			SavedAt: 200,
+		},
+	}
+	item, savedAt, ok := closeevent.Resolve(prior, post, "window-unlinked")
+	if !ok {
+		t.Fatal("expected resolved, got false")
+	}
+	if item.Window == nil || item.Window.Name != "from-embedded" {
+		t.Errorf("got window %+v, want the embedded result", item.Window)
+	}
+	if savedAt != 200 {
+		t.Errorf("got savedAt=%d, want 200", savedAt)
+	}
+}
+
+func TestResolve_NeitherResolves(t *testing.T) {
+	var prior snapshot.Manifest
+	post := closeevent.CloseManifest{Index: closeevent.IndexPost{}}
+	item, savedAt, ok := closeevent.Resolve(prior, post, "window-unlinked")
+	if ok {
+		t.Errorf("expected false, got true (item=%+v, savedAt=%d)", item, savedAt)
+	}
+	if item != nil {
+		t.Errorf("expected nil item, got %+v", item)
+	}
+}
+
+func TestParseManifest_NoResolvedKeyStillParses(t *testing.T) {
+	// Events recorded before Resolved existed carry no "resolved" key; parsing
+	// must succeed and Resolve must behave exactly as before (snapshot diff,
+	// no embedded fallback).
+	s := `{"session_id":"s","window_id":"@2","index":{"windows":[{"session":"s","index":1,"name":"keep"}]}}`
+	post, err := closeevent.ParseManifest(s)
+	if err != nil {
+		t.Fatalf("ParseManifest returned error: %v", err)
+	}
+	if post.Resolved != nil {
+		t.Fatalf("expected nil Resolved, got %+v", post.Resolved)
+	}
+	prior := snapshot.Manifest{
+		Sessions: []snapshot.Session{
+			{Name: "s", Windows: []snapshot.Window{
+				{Index: 1, Name: "keep", ID: "@1"},
+				{Index: 2, Name: "gone", ID: "@2"},
+			}},
+		},
+	}
+	item, _, ok := closeevent.Resolve(prior, post, "window-unlinked")
+	if !ok || item == nil || item.Window == nil || item.Window.ID != "@2" {
+		t.Fatalf("got item=%+v ok=%v, want the snapshot-diff result for @2", item, ok)
+	}
+}
+
 func TestFindClosed_SessionClosed_UnknownNameAmbiguousIsUnrecoverable(t *testing.T) {
 	// A scratch session created and killed inside a snapshot gap: no snapshot
 	// holds it, and two sessions are non-live. Guessing the first would offer

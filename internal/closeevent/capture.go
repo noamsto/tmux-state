@@ -5,6 +5,7 @@ package closeevent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/noamsto/tmux-remux/internal/snapshot"
@@ -82,18 +83,21 @@ func Capture(ctx context.Context, db *store.Store, a Args) (int64, error) {
 		}
 	}
 
-	wrapped, err := json.Marshal(CloseManifest{
+	man := CloseManifest{
 		SessionID:   a.SessionID,
 		SessionName: a.SessionName,
 		WindowID:    a.WindowID,
 		PaneID:      a.PaneID,
 		Index:       a.Index,
-	})
+	}
+	man.Resolved = resolveAtCapture(ctx, db, a, man)
+
+	wrapped, err := json.Marshal(man)
 	if err != nil {
 		return 0, err
 	}
 
-	return db.InsertEvent(ctx, store.Event{
+	id, err := db.InsertEvent(ctx, store.Event{
 		Ts:           now,
 		Kind:         a.Kind,
 		Scope:        scopeFor(a.Kind),
@@ -101,6 +105,86 @@ func Capture(ctx context.Context, db *store.Store, a Args) (int64, error) {
 		Host:         a.Host,
 		ManifestJSON: string(wrapped),
 	})
+	if err != nil {
+		return 0, err
+	}
+
+	linkResolvedScrollback(ctx, db, id, man.Resolved)
+	return id, nil
+}
+
+// resolveAtCapture embeds the closed entity in the event at capture time so a
+// later read no longer needs a surviving snapshot to resolve it. Returns nil
+// whenever embedding isn't safe, leaving the event on the snapshot-diff path.
+func resolveAtCapture(ctx context.Context, db *store.Store, a Args, man CloseManifest) *ResolvedClose {
+	idKnown := (a.Kind == "pane-died" && a.PaneID != "") || (a.Kind == "window-unlinked" && a.WindowID != "")
+	if !idKnown {
+		// session-closed is excluded: findClosedSession isn't id-aware and, when
+		// no name matches, guesses the sole remaining candidate anyway. Re-derived
+		// per read that guess decays as other sessions close; embedded it would be
+		// permanent.
+		return nil
+	}
+
+	snap, err := db.LatestSnapshot(ctx)
+	if err != nil || snap == nil {
+		return nil
+	}
+	var prior snapshot.Manifest
+	if json.Unmarshal([]byte(snap.ManifestJSON), &prior) != nil {
+		return nil
+	}
+
+	// findClosedWindow/findClosedPane only refuse to guess inside their id
+	// branch when the prior is also id-aware; an old, id-less snapshot falls
+	// through to a positional session:index fallback that, under
+	// renumber-windows, can return a SURVIVING entity instead of the closed one.
+	switch a.Kind {
+	case "pane-died":
+		if !priorHasPaneIDs(prior) {
+			return nil
+		}
+	case "window-unlinked":
+		if !priorHasWindowIDs(prior) {
+			return nil
+		}
+	}
+
+	item := FindClosed(prior, man, a.Kind)
+	if item == nil {
+		return nil
+	}
+	return &ResolvedClose{Item: *item, SavedAt: prior.SavedAt}
+}
+
+// linkResolvedScrollback links the embedded entity's panes to the event so
+// their scrollback blobs survive the source snapshot being pruned. Failures
+// are swallowed: the event row is already committed by this point, and
+// capture-event runs from a `run-shell -b` tmux hook, so surfacing an error
+// here would print a tmux-remux: error: banner on an ordinary pane close that
+// actually succeeded — e.g. a gc racing between the snapshot read and this
+// link trips the scrollback_sha foreign key.
+func linkResolvedScrollback(ctx context.Context, db *store.Store, id int64, resolved *ResolvedClose) {
+	if resolved == nil {
+		return
+	}
+	item := resolved.Item
+	// The pane key includes the window index, so a missing window leaves
+	// nothing to link regardless of which branch item.Pane took.
+	if item.Window == nil {
+		return
+	}
+	panes := item.Window.Panes
+	if item.Pane != nil {
+		panes = []snapshot.Pane{*item.Pane}
+	}
+	for _, p := range panes {
+		if p.ScrollbackSHA == "" {
+			continue
+		}
+		key := fmt.Sprintf("%s:%d:%d", item.SessionName, item.Window.Index, p.Index)
+		_ = db.LinkEventScrollback(ctx, id, key, p.ScrollbackSHA)
+	}
 }
 
 // resolveKilledPane fills in the pane and window ids of an id-less pane-died

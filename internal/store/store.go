@@ -266,9 +266,15 @@ func (s *Store) PruneSnapshots(ctx context.Context, keep int, nowMs int64) error
 	return nil
 }
 
-// PruneUnresolvableCloseEvents deletes non-snapshot events with no prior
-// snapshot to resolve against (ts <= MIN(snapshot ts)). When the store has
-// no snapshots, MIN is NULL and that comparison deletes nothing.
+// PruneUnresolvableCloseEvents deletes non-snapshot events at or older than
+// the oldest surviving snapshot (ts <= MIN(snapshot ts)). This is an age
+// floor, not a resolvability check: an event carrying an embedded entity
+// resolves fine without a snapshot, but still ages out here — deliberately,
+// since this floor is the only automatic bound on close-event growth
+// (keep-N only runs from the `prune` subcommand). An event captured in the
+// same millisecond as the only snapshot sits at the floor and is pruned
+// despite being resolvable. When the store has no snapshots, MIN is NULL and
+// that comparison deletes nothing.
 func (s *Store) PruneUnresolvableCloseEvents(ctx context.Context) (int64, error) {
 	res, err := s.db.ExecContext(ctx, `
 		DELETE FROM events
@@ -285,10 +291,9 @@ func (s *Store) PruneUnresolvableCloseEvents(ctx context.Context) (int64, error)
 	return n, nil
 }
 
-// PruneCloseEvents deletes non-snapshot events beyond the keep newest, and
-// also those with no prior snapshot to resolve against (ts <= MIN(snapshot
-// ts)). When the store has no snapshots, MIN is NULL and that comparison
-// deletes nothing.
+// PruneCloseEvents deletes non-snapshot events beyond the keep newest, plus
+// those at or past the age floor enforced by PruneUnresolvableCloseEvents
+// (see there — it applies regardless of keep, embedded entity or not).
 func (s *Store) PruneCloseEvents(ctx context.Context, keep int) (int64, error) {
 	res, err := s.db.ExecContext(ctx, `
 		DELETE FROM events

@@ -335,9 +335,11 @@ type undoTarget struct {
 	Item  *closeevent.ClosedItem
 	Prior snapshot.Manifest
 	OK    bool
-	// Discarded is the leading run of close events no snapshot ever captured.
-	// Recoverability only decays (snapshots get pruned, never added behind a
-	// timestamp), so these can never become restorable and undo drops them.
+	// Discarded is the leading run of close events resolveEvent can't resolve —
+	// neither a prior snapshot nor the entity embedded at capture time accounts
+	// for them. Recoverability only decays (snapshots get pruned, never added
+	// behind a timestamp), so these can never become restorable and undo drops
+	// them.
 	Discarded []store.Event
 	// FromSession names the session an event was borrowed from when the current
 	// session had nothing restorable. Empty for a same-session undo.
@@ -355,9 +357,10 @@ type undoTarget struct {
 // from. An empty `session` means no session context and scans server-wide.
 //
 // Unrecoverable events are discarded only when they belong to `session`.
-// Discarding is garbage collection — a close no snapshot captured can never
-// become restorable — but scoping it keeps the message honest: consuming another
-// session's dead rows here would rob that session of its own explanation.
+// Discarding is garbage collection — a close resolveEvent can't resolve can
+// never become restorable — but scoping it keeps the message honest: consuming
+// another session's dead rows here would rob that session of its own
+// explanation.
 func restorableClose(ctx context.Context, db *store.Store, session string) (undoTarget, error) {
 	evs, err := db.ListEvents(ctx, store.ListOpts{ExcludeKinds: []string{"snapshot"}, Limit: undoScanLimit})
 	if err != nil {
@@ -369,9 +372,9 @@ func restorableClose(ctx context.Context, db *store.Store, session string) (undo
 		item, prior, ok := resolveEvent(ctx, db, ev)
 		owner := eventOwner(ev, item)
 		mine := session == "" || owner == session
-		// Defense-in-depth on the sub-manifest: every item FindClosed returns
-		// now yields a non-empty one, but guard against a future resolver that
-		// can't build a restore plan rather than popping an un-restorable head.
+		// Defense-in-depth on the sub-manifest: every item closeevent.Resolve
+		// returns now yields a non-empty one, but guard against a future resolver
+		// that can't build a restore plan rather than popping an un-restorable head.
 		if !ok || len(item.SubManifest(prior.Host, prior.SavedAt).Sessions) == 0 {
 			if mine {
 				t.Discarded = append(t.Discarded, ev)
@@ -458,27 +461,39 @@ func discardSummary(evs []store.Event, more bool) string {
 	return fmt.Sprintf("%s never made it into a snapshot — discarded; %s", what, tail)
 }
 
-// resolveEvent resolves a close event to its lost entity against the most
-// recent pre-close snapshot. ok is false when the event isn't a recoverable
-// close: unparsable, no prior snapshot, or the entity was never captured.
+// priorSnapshot loads the most recent snapshot before ts, best-effort: a
+// missing snapshot or one that fails to unmarshal yields a zero Manifest
+// rather than an error, so callers can still fall back to a close event's
+// embedded entity via closeevent.Resolve.
+func priorSnapshot(ctx context.Context, db *store.Store, ts int64) snapshot.Manifest {
+	var prior snapshot.Manifest
+	snap, err := db.LatestSnapshotBefore(ctx, ts)
+	if err != nil || snap == nil {
+		return prior
+	}
+	if json.Unmarshal([]byte(snap.ManifestJSON), &prior) != nil {
+		return snapshot.Manifest{}
+	}
+	return prior
+}
+
+// resolveEvent resolves a close event to its lost entity, preferring the most
+// recent pre-close snapshot and falling back to the entity embedded at
+// capture time (closeevent.Resolve). ok is false when the event isn't a
+// recoverable close: unparsable, or neither source resolves it.
 func resolveEvent(ctx context.Context, db *store.Store, ev store.Event) (*closeevent.ClosedItem, snapshot.Manifest, bool) {
 	closeMan, err := closeevent.ParseManifest(ev.ManifestJSON)
 	if err != nil {
 		return nil, snapshot.Manifest{}, false
 	}
-	snap, err := db.LatestSnapshotBefore(ctx, ev.Ts)
-	if err != nil || snap == nil {
+	prior := priorSnapshot(ctx, db, ev.Ts)
+	item, savedAt, ok := closeevent.Resolve(prior, closeMan, ev.Kind)
+	if !ok {
 		return nil, snapshot.Manifest{}, false
 	}
-	var prior snapshot.Manifest
-	if err := json.Unmarshal([]byte(snap.ManifestJSON), &prior); err != nil {
-		return nil, snapshot.Manifest{}, false
-	}
-	item := closeevent.FindClosed(prior, closeMan, ev.Kind)
-	if item == nil {
-		return nil, snapshot.Manifest{}, false
-	}
-	return item, prior, true
+	// Equivalent on both paths: savedAt == prior.SavedAt on the snapshot path,
+	// and a manifest's Host is only ever written, never read.
+	return item, snapshot.Manifest{Host: ev.Host, SavedAt: savedAt}, true
 }
 
 // buildRestorePlan turns a resolved close into a restore plan. A lost pane is
@@ -649,9 +664,10 @@ func (c PickCmd) Run() error {
 
 // partitionRecoverable splits close events into those with a recoverable entity
 // (a non-empty sub-manifest in ctxs) and a count of those without. An
-// unrecoverable close — entity born-and-died inside a snapshot gap, or a window
-// moved rather than closed — carries nothing to restore, so the picker hides it
-// behind the returned count instead of listing a dead "(invalid manifest)" row.
+// unrecoverable close — no prior snapshot and no entity embedded at capture
+// time, or a window moved rather than closed — carries nothing to restore, so
+// the picker hides it behind the returned count instead of listing a dead
+// "(invalid manifest)" row.
 func partitionRecoverable(evs []store.Event, ctxs map[int64]picker.CloseContext) (kept []store.Event, hidden int) {
 	kept = make([]store.Event, 0, len(evs))
 	for _, ev := range evs {
@@ -664,10 +680,18 @@ func partitionRecoverable(evs []store.Event, ctxs map[int64]picker.CloseContext)
 	return kept, hidden
 }
 
-// buildCloseContexts resolves each close event against its parent snapshot
-// (most recent snapshot < event.Ts) to derive a short label + sub-manifest of
-// the lost entity. Best-effort: events without a recoverable parent get no map
-// entry, and partitionRecoverable filters those out of the picker as hidden.
+// buildCloseContexts resolves each close event — against its parent snapshot
+// (most recent snapshot < event.Ts) when that captures the entity, else the
+// entity embedded at capture time (closeevent.Resolve) — to derive a short
+// label + sub-manifest of the lost entity. Best-effort: events resolved by
+// neither get no map entry, and partitionRecoverable filters those out of the
+// picker as hidden.
+//
+// ScrollbackSkipped on the sub-manifest reflects prior, the freshly
+// re-looked-up snapshot — not necessarily the item Resolve actually returned.
+// On the embedded-entity fallback path, prior can be a different, unrelated
+// snapshot, so its throttle flag is cleared whenever the resolved item
+// carries scrollback of its own; otherwise it's propagated as-is.
 func buildCloseContexts(ctx context.Context, db *store.Store, evs []store.Event) map[int64]picker.CloseContext {
 	out := make(map[int64]picker.CloseContext, len(evs))
 	priorCache := map[int64]snapshot.Manifest{}
@@ -676,25 +700,17 @@ func buildCloseContexts(ctx context.Context, db *store.Store, evs []store.Event)
 		if err != nil {
 			continue
 		}
-		prior, ok := priorCache[ev.Ts]
-		if !ok {
-			snap, err := db.LatestSnapshotBefore(ctx, ev.Ts)
-			if err != nil || snap == nil {
-				priorCache[ev.Ts] = snapshot.Manifest{}
-				continue
-			}
-			if err := json.Unmarshal([]byte(snap.ManifestJSON), &prior); err != nil {
-				priorCache[ev.Ts] = snapshot.Manifest{}
-				continue
-			}
+		prior, cached := priorCache[ev.Ts]
+		if !cached {
+			prior = priorSnapshot(ctx, db, ev.Ts)
 			priorCache[ev.Ts] = prior
 		}
-		item := closeevent.FindClosed(prior, closeMan, ev.Kind)
-		if item == nil {
+		item, savedAt, ok := closeevent.Resolve(prior, closeMan, ev.Kind)
+		if !ok {
 			continue
 		}
-		sub := item.SubManifest(prior.Host, prior.SavedAt)
-		sub.ScrollbackSkipped = prior.ScrollbackSkipped
+		sub := item.SubManifest(ev.Host, savedAt)
+		sub.ScrollbackSkipped = prior.ScrollbackSkipped && !subManifestHasScrollback(sub)
 		out[ev.ID] = picker.CloseContext{
 			Label:       item.Describe(),
 			Placement:   placementFor(closeMan, item),
@@ -702,6 +718,21 @@ func buildCloseContexts(ctx context.Context, db *store.Store, evs []store.Event)
 		}
 	}
 	return out
+}
+
+// subManifestHasScrollback reports whether any pane in m carries a captured
+// scrollback blob.
+func subManifestHasScrollback(m snapshot.Manifest) bool {
+	for _, sess := range m.Sessions {
+		for _, w := range sess.Windows {
+			for _, p := range w.Panes {
+				if p.ScrollbackSHA != "" {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // placementFor locates a resolved close in the tmux hierarchy for the picker's
