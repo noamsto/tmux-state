@@ -294,10 +294,10 @@ func TestFindClosed_SessionClosed_UnnamedEventFallsBackToScan(t *testing.T) {
 	}
 }
 
-func TestFindClosed_SessionClosed_UnknownNameFallsBackToScan(t *testing.T) {
-	// The event names a session the prior snapshot never captured (born and
-	// gone inside a snapshot gap). Attribution degrades to the scan rather
-	// than losing the close entirely.
+func TestFindClosed_SessionClosed_UnknownNameWithOneCandidate(t *testing.T) {
+	// The event names a session the prior snapshot doesn't hold, but exactly
+	// one session is non-live — the attribution is unambiguous whatever the
+	// name says, and a rename is the likely explanation.
 	prior := snapshot.Manifest{
 		V:    1,
 		Host: "h",
@@ -307,7 +307,7 @@ func TestFindClosed_SessionClosed_UnknownNameFallsBackToScan(t *testing.T) {
 		},
 	}
 	post := closeevent.CloseManifest{
-		SessionName: "ephemeral",
+		SessionName: "halo-nix-config-renamed",
 		Index: closeevent.IndexPost{
 			Windows: []tmux.WindowRow{{Session: "lazytmux", Index: 1, Name: "main"}},
 		},
@@ -318,5 +318,30 @@ func TestFindClosed_SessionClosed_UnknownNameFallsBackToScan(t *testing.T) {
 	}
 	if got.SessionName != "halo-nix-config" {
 		t.Errorf("got SessionName=%q, want halo-nix-config", got.SessionName)
+	}
+}
+
+func TestFindClosed_SessionClosed_UnknownNameAmbiguousIsUnrecoverable(t *testing.T) {
+	// A scratch session created and killed inside a snapshot gap: no snapshot
+	// holds it, and two sessions are non-live. Guessing the first would offer
+	// a row labelled "remux-shot2" whose restore rebuilds halo-nix-config, so
+	// the close is reported unrecoverable and the picker hides it.
+	prior := snapshot.Manifest{
+		V:    1,
+		Host: "h",
+		Sessions: []snapshot.Session{
+			{Name: "halo-nix-config", Windows: []snapshot.Window{{Index: 1, Name: "main"}}},
+			{Name: "noamsto", Windows: []snapshot.Window{{Index: 1, Name: "main"}}},
+			{Name: "lazytmux", Windows: []snapshot.Window{{Index: 1, Name: "main"}}},
+		},
+	}
+	post := closeevent.CloseManifest{
+		SessionName: "remux-shot2",
+		Index: closeevent.IndexPost{
+			Windows: []tmux.WindowRow{{Session: "lazytmux", Index: 1, Name: "main"}},
+		},
+	}
+	if got := closeevent.FindClosed(prior, post, "session-closed"); got != nil {
+		t.Errorf("got %+v (Session=%+v), want nil for an ambiguous unmatched name", got, got.Session)
 	}
 }
