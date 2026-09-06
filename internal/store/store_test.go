@@ -358,6 +358,125 @@ func TestPruneUnresolvableCloseEventsKeepsResolvable(t *testing.T) {
 	}
 }
 
+func TestPruneUnresolvableCloseEventsSurvivesAboveFloorWithEmbeddedEntity(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	ctx := context.Background()
+	db, err := store.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	const embeddedManifest = `{"session_id":"s","window_id":"@2","index":{},"resolved":{"item":{"window_index":2,"session_name":"s"},"saved_at":100}}`
+
+	if _, err := db.InsertEvent(ctx, store.Event{
+		Ts: 100, Kind: "snapshot", Scope: "session", Host: "h", ManifestJSON: "{}",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.InsertEvent(ctx, store.Event{
+		Ts: 101, Kind: "window-unlinked", Scope: "window", Host: "h", ManifestJSON: embeddedManifest,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := db.PruneUnresolvableCloseEvents(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	closes, err := db.ListEvents(ctx, store.ListOpts{ExcludeKinds: []string{"snapshot"}, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(closes) != 1 {
+		t.Fatalf("got %d closes, want 1: above the floor should survive even though nothing else resolves it", len(closes))
+	}
+}
+
+func TestPruneUnresolvableCloseEventsPrunesAtFloorEvenWithEmbeddedEntity(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	ctx := context.Background()
+	db, err := store.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	const embeddedManifest = `{"session_id":"s","window_id":"@2","index":{},"resolved":{"item":{"window_index":2,"session_name":"s"},"saved_at":100}}`
+
+	if _, err := db.InsertEvent(ctx, store.Event{
+		Ts: 100, Kind: "snapshot", Scope: "session", Host: "h", ManifestJSON: "{}",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Captured in the same millisecond as the only snapshot: at the floor, so
+	// it is pruned despite carrying an embedded entity that resolves fine.
+	if _, err := db.InsertEvent(ctx, store.Event{
+		Ts: 100, Kind: "window-unlinked", Scope: "window", Host: "h", ManifestJSON: embeddedManifest,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := db.PruneUnresolvableCloseEvents(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	closes, err := db.ListEvents(ctx, store.ListOpts{ExcludeKinds: []string{"snapshot"}, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(closes) != 0 {
+		t.Fatalf("got %d closes, want 0: the age floor prunes even a resolvable, embedded-entity event", len(closes))
+	}
+}
+
+func TestPruneUnresolvableCloseEventsDecrementsRefcount(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	ctx := context.Background()
+	db, err := store.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if err := db.UpsertScrollback(ctx, "sha1", 10, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.InsertEvent(ctx, store.Event{
+		Ts: 100, Kind: "snapshot", Scope: "session", Host: "h", ManifestJSON: "{}",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	closeID, err := db.InsertEvent(ctx, store.Event{
+		Ts: 100, Kind: "pane-died", Scope: "session", Host: "h", ManifestJSON: "{}",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.LinkEventScrollback(ctx, closeID, "s:1:1", "sha1"); err != nil {
+		t.Fatal(err)
+	}
+
+	var refcount int
+	_ = db.DB().QueryRowContext(ctx, "SELECT refcount FROM scrollbacks WHERE sha256='sha1'").Scan(&refcount)
+	if refcount != 1 {
+		t.Fatalf("refcount before prune = %d, want 1", refcount)
+	}
+
+	deleted, err := db.PruneUnresolvableCloseEvents(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted != 1 {
+		t.Fatalf("deleted = %d, want 1", deleted)
+	}
+
+	_ = db.DB().QueryRowContext(ctx, "SELECT refcount FROM scrollbacks WHERE sha256='sha1'").Scan(&refcount)
+	if refcount != 0 {
+		t.Errorf("refcount after prune = %d, want 0", refcount)
+	}
+}
+
 func TestUpsertScrollbackIncrementsRefcount(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	ctx := context.Background()

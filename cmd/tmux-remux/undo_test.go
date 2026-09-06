@@ -146,6 +146,101 @@ func TestRestorableCloseEmptyWhenNothingRecoverable(t *testing.T) {
 	}
 }
 
+// emptyStore returns an open store with no snapshot at all, so any close
+// event in it can only resolve through the entity embedded at capture time.
+func emptyStore(ctx context.Context, t *testing.T) *store.Store {
+	t.Helper()
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return db
+}
+
+// resolvedWindowManifest builds a window-unlinked CloseManifest carrying an
+// embedded entity for a window no prior snapshot ever captured.
+func resolvedWindowManifest(t *testing.T) string {
+	t.Helper()
+	item := closeevent.ClosedItem{
+		Window: &snapshot.Window{
+			Index: 4, Name: "win", Layout: "L", ID: "@9",
+			Panes: []snapshot.Pane{{Index: 1, Cwd: "/m", Command: "fish", ID: "%9"}},
+		},
+		SessionName: "mono",
+		WindowIndex: 4,
+	}
+	man := closeevent.CloseManifest{
+		WindowID:    "@9",
+		SessionName: "mono",
+		Resolved:    &closeevent.ResolvedClose{Item: item, SavedAt: 100},
+	}
+	return string(mustJSON(t, man))
+}
+
+// TestRestorableCloseUsesEmbeddedEntityWithoutAPriorSnapshot guards the case
+// this step exists for: a close event with nothing in any snapshot must still
+// be restorable, and — critically — must not be dropped into Discarded, since
+// undo --pop deletes discarded rows outright.
+func TestRestorableCloseUsesEmbeddedEntityWithoutAPriorSnapshot(t *testing.T) {
+	ctx := context.Background()
+	db := emptyStore(ctx, t)
+	id := insertEvent(ctx, t, db, 200, "window-unlinked", resolvedWindowManifest(t))
+
+	target, err := restorableClose(ctx, db, "")
+	if err != nil {
+		t.Fatalf("restorableClose: %v", err)
+	}
+	if !target.OK || target.Event.ID != id {
+		t.Fatalf("OK = %v, event = %d, want the embedded close %d restorable", target.OK, target.Event.ID, id)
+	}
+	if len(target.Discarded) != 0 {
+		t.Errorf("Discarded = %+v, want none — the embedded entity resolves it", target.Discarded)
+	}
+	if target.Item.Window == nil || target.Item.Window.ID != "@9" {
+		t.Errorf("item.Window = %+v, want the embedded window @9", target.Item.Window)
+	}
+}
+
+// TestBuildCloseContextsUsesEmbeddedEntityWithoutAPriorSnapshot mirrors the
+// picker's read path: an event with no prior snapshot but an embedded entity
+// must still get a picker.CloseContext, not be hidden as unrecoverable.
+func TestBuildCloseContextsUsesEmbeddedEntityWithoutAPriorSnapshot(t *testing.T) {
+	ctx := context.Background()
+	db := emptyStore(ctx, t)
+	ev := store.Event{ID: 1, Ts: 200, Kind: "window-unlinked", Host: "h", ManifestJSON: resolvedWindowManifest(t)}
+
+	ctxs := buildCloseContexts(ctx, db, []store.Event{ev})
+
+	got, ok := ctxs[ev.ID]
+	if !ok {
+		t.Fatal("buildCloseContexts: no context for the embedded-entity event")
+	}
+	if len(got.SubManifest.Sessions) != 1 || got.SubManifest.Sessions[0].Name != "mono" {
+		t.Errorf("SubManifest = %+v, want one session 'mono'", got.SubManifest.Sessions)
+	}
+}
+
+// TestRestorableCloseStillDiscardsWithNoEmbeddedEntity guards against
+// over-reach: an event with neither a prior snapshot nor an embedded entity
+// must land in Discarded exactly as it did before this step.
+func TestRestorableCloseStillDiscardsWithNoEmbeddedEntity(t *testing.T) {
+	ctx := context.Background()
+	db := emptyStore(ctx, t)
+	id := insertEvent(ctx, t, db, 200, "window-unlinked", closeWindowManifest(t, "@14"))
+
+	target, err := restorableClose(ctx, db, "")
+	if err != nil {
+		t.Fatalf("restorableClose: %v", err)
+	}
+	if target.OK {
+		t.Error("OK = true, want false — no snapshot and no embedded entity to fall back on")
+	}
+	if len(target.Discarded) != 1 || target.Discarded[0].ID != id {
+		t.Errorf("Discarded = %+v, want just event %d", target.Discarded, id)
+	}
+}
+
 // A window that was itself restored carries a fresh @id, so matching only on
 // the snapshot's id would report "not live" and recreate the window a second
 // time. Name and index are the fallbacks.
