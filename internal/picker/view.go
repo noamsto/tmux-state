@@ -172,11 +172,19 @@ func (m PickerModel) bodyHeight() int {
 }
 
 // closeSideBySideMin is the narrowest terminal that puts the flat close list
-// and its preview side by side. Below it there are not enough cells for both
-// a list that still names its reopen target and a preview wide enough to read
-// a wrapped line of scrollback, so the preview goes underneath at full width
-// instead — where even an 80-column terminal can read it.
-const closeSideBySideMin = 110
+// and its preview side by side: it is not a number of its own but the sum of
+// what the two columns each need. Below it one of them would have to give up
+// something the other cannot replace, so the preview goes underneath at full
+// width instead — where even an 80-column terminal can read it, and where the
+// list keeps every column the whole terminal can hold.
+const closeSideBySideMin = closeListMin + closePreviewMin
+
+// closePreviewMin is the narrowest preview that shows a full-width tmux pane
+// line whole. previewWindow cuts scrollback to the column rather than
+// wrapping it, so a preview below this silently clips the right-hand end of
+// every line: 85 cells is border, padding and the block rail (5) plus the 80
+// columns a default pane wraps at.
+const closePreviewMin = 85
 
 // stacksPanel reports whether the map/scrollback panel goes under the list
 // rather than beside it — the case for a terminal too narrow for both. The
@@ -251,9 +259,11 @@ func (m PickerModel) paneWidthsThree() (int, int, int) {
 // preview. The list's appetite is bounded — its columns are a marker, a kind,
 // a path tail, a name and a reopen target, and past closeListMax the extra
 // cells only pad the gap before the age — while the preview's is not: it
-// shows wrapped scrollback, which is what tells two otherwise identical
-// closes apart. So the list takes a fixed share up to that ceiling and every
-// cell beyond it goes to the preview.
+// shows scrollback, which is what tells two otherwise identical closes apart.
+// So the list takes a fixed share between its floor and that ceiling, and
+// every cell beyond goes to the preview. The floor binds until the terminal
+// is around 195 columns wide; the proportion is what keeps the two growing
+// together past that.
 func closeListWidth(width int) int {
 	w := width * 2 / 5
 	if w < closeListMin {
@@ -265,14 +275,16 @@ func closeListWidth(width int) int {
 	return w
 }
 
-// Bounds on the close list's column, both read off rendered output. The floor
-// is where layoutRow stops shedding columns: at 44 a row loses the "(gone)"
-// tag that says its session must be recreated, at 36 the window name, at 30
-// the reopen target. The ceiling is where the widest row in a realistic list
-// stops growing and the extra cells only pad the gap before the age.
+// Bounds on the close list's column, both read off rendered output for a list
+// whose rows carry every column — including the cwd tail, which only appears
+// when a session's closes are not all in one directory. The floor is where
+// layoutRow stops shedding: below 78 the cwd goes first, then at 44 the
+// "(gone)" tag that says the session must be recreated, at 36 the window
+// name, at 30 the reopen target. The ceiling is where the cwd column reaches
+// its 24-cell cap and further cells only pad the gap before the age.
 const (
-	closeListMin = 50
-	closeListMax = 64
+	closeListMin = 78
+	closeListMax = 100
 )
 
 func renderList(m PickerModel, width, height int) string {
@@ -979,13 +991,21 @@ func (v closeListView) cwdColumnWidth(innerWidth int) int {
 }
 
 // fitCwd pads or left-truncates a tail to exactly width cells. Truncation is
-// from the left, since the tail is what discriminates.
+// from the left, since the tail is what discriminates. A cut that lands
+// mid-segment ("…sto/tmux-remux") reads as a mangled word rather than a path,
+// so the cut is nudged forward to the next "/" when that costs only a few
+// more cells — past that the segment is long enough that losing it whole
+// gives up more than the ragged edge does.
 func fitCwd(tail string, width int) string {
 	w := lipgloss.Width(tail)
 	if w <= width {
 		return tail + strings.Repeat(" ", width-w)
 	}
-	return ansi.TruncateLeft(tail, w-width+1, "…")
+	cut := ansi.TruncateLeft(tail, w-width+1, "…")
+	if i := strings.IndexByte(cut, '/'); i > 0 && lipgloss.Width(cut[:i]) <= 6 {
+		cut = "…" + cut[i:]
+	}
+	return cut + strings.Repeat(" ", width-lipgloss.Width(cut))
 }
 
 // closeRowScopeStyle colours a close row by what it would restore, matching
