@@ -23,20 +23,22 @@ import (
 
 	"github.com/noamsto/tmux-remux/internal/closeevent"
 	"github.com/noamsto/tmux-remux/internal/picker"
+	"github.com/noamsto/tmux-remux/internal/scrollback"
 	"github.com/noamsto/tmux-remux/internal/snapshot"
 	"github.com/noamsto/tmux-remux/internal/store"
 )
 
 func main() {
-	layout := flag.String("layout", "tree", "tree|flat")
+	layout := flag.String("layout", "tree", "tree|flat|split")
 	cols := flag.Int("cols", 130, "render width")
 	rows := flag.Int("rows", 40, "render height")
 	session := flag.String("session", "tmux-remux", "session that counts as \"this session\"")
+	cursor := flag.Int("cursor", 0, "split: index of the selected selectable row")
 	flag.Parse()
 
 	ctx := context.Background()
 	db := mustOpenCopy(ctx)
-	evs, err := db.ListEvents(ctx, store.ListOpts{ExcludeKinds: []string{"snapshot"}, Limit: 50})
+	evs, err := db.ListEvents(ctx, store.ListOpts{ExcludeKinds: []string{"snapshot"}, Limit: 400})
 	if err != nil {
 		fatal(err)
 	}
@@ -51,6 +53,7 @@ func main() {
 	evs = kept
 
 	initStyles()
+	sbStore = scrollback.New(filepath.Join(os.Getenv("HOME"), ".local/share/tmux-remux/scrollbacks"))
 	live := liveSessions(ctx)
 
 	switch *layout {
@@ -58,10 +61,16 @@ func main() {
 		fmt.Print(renderTree(evs, ctxs, *session, live, *cols, *rows, hidden))
 	case "flat":
 		fmt.Print(renderFlat(evs, ctxs, *session, live, *cols, *rows, hidden))
+	case "split":
+		fmt.Print(renderSplit(evs, ctxs, *session, live, *cols, *rows, hidden, *cursor))
 	default:
 		fatal(fmt.Errorf("unknown layout %q", *layout))
 	}
 }
+
+// sbStore is the real scrollback store, read-only; the split preview pulls
+// pane output straight off it.
+var sbStore *scrollback.Store
 
 func fatal(err error) {
 	fmt.Fprintln(os.Stderr, "proto-layout:", err)
@@ -450,10 +459,12 @@ type flatRow struct {
 	count   int
 	ts      int64
 	session string
+	cc      picker.CloseContext
 }
 
-func renderFlat(evs []store.Event, ctxs map[int64]picker.CloseContext, current string, live map[string]bool, cols, rows, hidden int) string {
-	var mine, other []*flatRow
+// buildFlatRows collapses the events into the flat list's rows, split into the
+// current session's closes and everything else.
+func buildFlatRows(evs []store.Event, ctxs map[int64]picker.CloseContext, current string, live map[string]bool) (mine, other []*flatRow) {
 	byIdentity := map[string]*flatRow{}
 	for _, ev := range evs {
 		cc, ok := ctxs[ev.ID]
@@ -475,7 +486,7 @@ func renderFlat(evs []store.Event, ctxs map[int64]picker.CloseContext, current s
 		}
 
 		pane, hasPane := firstPane(cc)
-		r := &flatRow{kind: p.Scope, count: 1, ts: ev.Ts, session: name}
+		r := &flatRow{kind: p.Scope, count: 1, ts: ev.Ts, session: name, cc: cc}
 		if hasPane {
 			r.cwd = tildify(pane.Cwd)
 		}
@@ -506,7 +517,11 @@ func renderFlat(evs []store.Event, ctxs map[int64]picker.CloseContext, current s
 			other = append(other, r)
 		}
 	}
+	return mine, other
+}
 
+func renderFlat(evs []store.Event, ctxs map[int64]picker.CloseContext, current string, live map[string]bool, cols, rows, hidden int) string {
+	mine, other := buildFlatRows(evs, ctxs, current, live)
 	inner := cols - sFrame.GetHorizontalFrameSize()
 	narrow := cols <= 80
 	var lines []string
@@ -558,6 +573,274 @@ func flatLine(r *flatRow, inner int, narrow bool, current string) string {
 	b.WriteString(cell(sScaffold.Render(count), cntW))
 	b.WriteString(pad(sDim.Render(relAge(r.ts)), ageW))
 	return ansi.Truncate(b.String(), inner, "…")
+}
+
+// ------------------------------------------------------------- variant: split
+
+// renderSplit puts the flat list on the left and, on the right, the scrollback
+// of every pane the cursor's close took down. The user's windows are 1-or-2
+// panes, so there is no layout worth mapping and no pane to navigate to — every
+// pane fits in the panel at once.
+func renderSplit(evs []store.Event, ctxs map[int64]picker.CloseContext, current string, live map[string]bool, cols, rows, hidden, cursor int) string {
+	mine, other := buildFlatRows(evs, ctxs, current, live)
+
+	listW := cols * 60 / 100
+	if listW < 40 {
+		listW = 40
+	}
+	prevW := cols - listW
+	listInner := listW - sFrame.GetHorizontalFrameSize()
+	prevInner := prevW - sFrame.GetHorizontalFrameSize()
+
+	var sel *flatRow
+	seen, selLine := 0, 0
+	var lines []string
+	section := func(title string, rs []*flatRow) {
+		if len(rs) == 0 {
+			return
+		}
+		lines = append(lines, sHeader.Width(listInner).Render(pad(title, listInner)))
+		for _, r := range rs {
+			active := seen == cursor
+			if active {
+				sel, selLine = r, len(lines)
+			}
+			seen++
+			lines = append(lines, splitLine(r, listInner, active))
+		}
+	}
+	section("THIS SESSION · "+current, mine)
+	section("OTHER SESSIONS", other)
+
+	body := rows - 2
+	if hidden > 0 {
+		body--
+	}
+	// Scroll the list so the cursor is always on screen; the prototype has no
+	// keys, but --cursor has to be able to reach the whole history.
+	if len(lines) > body {
+		start := 0
+		if selLine >= body {
+			start = selLine - body + 1
+		}
+		lines = lines[start : start+body]
+	}
+	if hidden > 0 {
+		lines = append(lines, sDim.Width(listInner).Align(lipgloss.Center).
+			Render(fmt.Sprintf("— %d unrecoverable closes hidden —", hidden)))
+	}
+	left := sFrame.Width(listW).Height(rows - 2).MaxHeight(rows).Render(strings.Join(lines, "\n"))
+
+	right := sFrame.Width(prevW).Height(rows - 2).MaxHeight(rows).
+		Render(strings.Join(previewLines(sel, prevInner, rows-2), "\n"))
+	return lipgloss.JoinHorizontal(lipgloss.Top, left, right) + "\n"
+}
+
+// splitLine is flatLine with the columns rebalanced for the narrower list and
+// the cwd reduced to whatever discriminates it from the session's own checkout.
+func splitLine(r *flatRow, inner int, active bool) string {
+	kindW, winW, extraW, reopenW, cntW, ageW := 8, 13, 9, 16, 3, 4
+	if inner < 60 {
+		kindW, winW, extraW, reopenW, cntW, ageW = 7, 12, 0, 12, 3, 3
+	}
+	// cwd takes what is left, but never so little that it vanishes: the window
+	// column gives up the difference rather than the row overflowing and
+	// swallowing the age.
+	cwdW := inner - 2 - kindW - winW - extraW - reopenW - cntW - ageW
+	if cwdW < 6 {
+		winW -= 6 - cwdW
+		cwdW = 6
+	}
+	count := ""
+	if r.count > 1 {
+		count = fmt.Sprintf("×%d", r.count)
+	}
+	paint := func(st lipgloss.Style, s string) string {
+		if active {
+			return s
+		}
+		return st.Render(s)
+	}
+	var b strings.Builder
+	b.WriteString("● ")
+	b.WriteString(cell(paint(sDim, r.kind), kindW))
+	b.WriteString(cell(paint(sPane, truncLeft(cwdTail(r.cwd, r.session), cwdW-1)), cwdW))
+	b.WriteString(cell(paint(sWindow, r.window), winW))
+	if extraW > 0 {
+		b.WriteString(cell(paint(sScaffold, r.extra), extraW))
+	}
+	b.WriteString(cell(paint(sSession, "→ "+r.reopen), reopenW))
+	b.WriteString(cell(paint(sScaffold, count), cntW))
+	b.WriteString(pad(paint(sDim, relAge(r.ts)), ageW))
+	line := ansi.Truncate(b.String(), inner, "…")
+	if active {
+		return sActive.Width(inner).Render(pad(line, inner))
+	}
+	return line
+}
+
+// cwdTail keeps only the part of a cwd that discriminates it. The ordinary
+// checkout for a session is the path whose basename is the session name, and
+// carries no information; a worktree hangs a branch directory off that name, so
+// what follows the session segment is the whole signal.
+func cwdTail(cwd, session string) string {
+	if cwd == "" {
+		return ""
+	}
+	segs := strings.Split(strings.Trim(cwd, "/"), "/")
+	for i := len(segs) - 1; i >= 0; i-- {
+		if segs[i] != session {
+			continue
+		}
+		if i == len(segs)-1 {
+			return ""
+		}
+		return strings.Join(segs[i+1:], "/")
+	}
+	return segs[len(segs)-1]
+}
+
+// closedPane pairs a pane with the window it was closed from, so the preview
+// can label its rule.
+type closedPane struct {
+	window snapshot.Window
+	pane   snapshot.Pane
+}
+
+// closedPanes lists what the close actually took down. A pane close carries its
+// whole enclosing window in the sub-manifest, so it has to be narrowed back
+// down to the one pane the placement names.
+func closedPanes(cc picker.CloseContext) []closedPane {
+	var out []closedPane
+	for _, s := range cc.SubManifest.Sessions {
+		for _, w := range s.Windows {
+			for _, p := range w.Panes {
+				out = append(out, closedPane{window: w, pane: p})
+			}
+		}
+	}
+	if cc.Placement.Scope != "pane" {
+		return out
+	}
+	for _, cp := range out {
+		if cp.pane.ID == cc.Placement.PaneID {
+			return []closedPane{cp}
+		}
+	}
+	return out[:1]
+}
+
+// previewLines renders the right panel: a two-line header, then every closed
+// pane's scrollback tail, stacked under a rule that names it.
+func previewLines(r *flatRow, inner, height int) []string {
+	if r == nil {
+		return padTo([]string{sDim.Render("(no row selected)")}, inner, height)
+	}
+	panes := closedPanes(r.cc)
+	head := []string{
+		sSession.Render(pad(ansi.Truncate(r.reopen+" · "+r.window, inner, "…"), inner)),
+		sDim.Render(pad(fmt.Sprintf("%s close · %s · closed %s ago", r.kind, countPanes(len(panes)), relAge(r.ts)), inner)),
+		"",
+	}
+	avail := height - len(head)
+	if avail < 1 || len(panes) == 0 {
+		return padTo(head, inner, height)
+	}
+
+	each := avail/len(panes) - 1
+	if each < 1 {
+		each = 1
+	}
+	multiWindow := false
+	for _, cp := range panes {
+		if cp.window.Name != panes[0].window.Name {
+			multiWindow = true
+		}
+	}
+	out := head
+	for _, cp := range panes {
+		label := fmt.Sprintf("%d · %s", cp.pane.Index, cp.pane.Command)
+		if multiWindow {
+			label = snapshot.StripFormat(cp.window.Name) + " · " + label
+		}
+		out = append(out, sScaffold.Render(rule(label, inner)))
+		out = append(out, paneTail(cp.pane, inner, each)...)
+	}
+	if len(out) > height {
+		out = out[:height]
+	}
+	return padTo(out, inner, height)
+}
+
+func countPanes(n int) string {
+	if n == 1 {
+		return "1 pane"
+	}
+	return fmt.Sprintf("%d panes", n)
+}
+
+func rule(label string, width int) string {
+	s := "── " + label + " "
+	if gap := width - lipgloss.Width(s); gap > 0 {
+		s += strings.Repeat("─", gap)
+	}
+	return ansi.Truncate(s, width, "")
+}
+
+// paneTail reads the pane's real scrollback and returns its last n lines,
+// sanitized the way internal/picker's preview does so escape sequences cannot
+// wreck the frame.
+func paneTail(p snapshot.Pane, width, n int) []string {
+	blank := func(msg string) []string {
+		out := []string{sDim.Render(pad(msg, width))}
+		for len(out) < n {
+			out = append(out, "")
+		}
+		return out
+	}
+	if p.ScrollbackSHA == "" {
+		return blank("(no scrollback captured)")
+	}
+	content, err := sbStore.Get(context.Background(), p.ScrollbackSHA)
+	if err != nil {
+		return blank("(scrollback missing: " + err.Error() + ")")
+	}
+	raw := strings.Split(strings.TrimRight(sanitizeScrollback(string(content)), "\n"), "\n")
+	if len(raw) > n {
+		raw = raw[len(raw)-n:]
+	}
+	out := make([]string, 0, n)
+	for _, l := range raw {
+		out = append(out, ansi.Truncate(l, width, ""))
+	}
+	for len(out) < n {
+		out = append(out, "")
+	}
+	return out
+}
+
+func padTo(lines []string, inner, height int) []string {
+	for len(lines) < height {
+		lines = append(lines, strings.Repeat(" ", inner))
+	}
+	return lines[:height]
+}
+
+// Copied from internal/picker/preview.go, which keeps them unexported: strip
+// every escape sequence except SGR, plus the control characters that break a
+// framed render.
+var (
+	structuralANSI = regexp.MustCompile(`\x1b\[[0-9;?]*[A-Za-ln-~]`)
+	oscANSI        = regexp.MustCompile(`\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)`)
+	otherESC       = regexp.MustCompile(`\x1b[()=>NMc78]`)
+	ctrlChars      = strings.NewReplacer("\x00", "", "\x08", "", "\x0b", "", "\x0c", "", "\r", "")
+)
+
+func sanitizeScrollback(s string) string {
+	s = oscANSI.ReplaceAllString(s, "")
+	s = structuralANSI.ReplaceAllString(s, "")
+	s = otherESC.ReplaceAllString(s, "")
+	return ctrlChars.Replace(s)
 }
 
 // ---------------------------------------------------------------- the frame
