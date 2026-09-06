@@ -272,6 +272,7 @@ func TestPruneCloseEventsDropsUnresolvable(t *testing.T) {
 	insert(100, "snapshot")
 	insert(200, "snapshot")
 	insert(50, "pane-died")
+	insert(100, "pane-died") // == MIN snapshot ts: no prior snapshot
 	insert(150, "pane-died")
 	insert(250, "pane-died")
 
