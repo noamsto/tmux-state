@@ -153,8 +153,11 @@ func (m PickerModel) renderClosePreview(width int) string {
 
 	// A lipgloss frame pads short content but does not clip overflow — once the
 	// body has more lines than fit, MaxHeight hard-truncates the line list,
-	// dropping the closing border row rather than the excess. So the header is
-	// clipped to the interior and the body only ever gets what is left.
+	// dropping the closing border row rather than the excess. Hence the body
+	// only ever gets what the header leaves. The header clip below is a bound,
+	// not a live path: the header is two lines and close mode never stacks, so
+	// innerHeight is at least three. It stays because a smaller floor would
+	// make it fire, and silently losing the border is the failure it prevents.
 	lines := closePreviewHeader(cc, innerWidth, time.Now(), n.Ts)
 	if len(lines) > innerHeight {
 		lines = lines[:innerHeight]

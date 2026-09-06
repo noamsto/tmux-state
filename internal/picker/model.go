@@ -589,10 +589,10 @@ func (m PickerModel) Filter() filter.Filter { return m.filter }
 // SelectedID returns the event ID of the row the user confirmed, or 0 on cancel.
 func (m PickerModel) SelectedID() int64 { return m.selectedID }
 
-// SelectedManifest returns the parsed manifest of the selected event. For
-// close-event mode this is the sub-manifest of just-the-closed-entity (as
-// resolved by SetCloseContexts), so callers can hand it directly to
-// restore.BuildPlan to recreate the lost session/window.
+// SelectedManifest returns the parsed manifest of the selected event. Snapshot
+// mode hands it to restore.BuildPlan. Close mode does not: buildRestorePlan
+// restores from the ClosedItem's own Pane/Window pointers, and reads the
+// sub-manifest only for shape checks and to name the session to focus.
 func (m PickerModel) SelectedManifest() snapshot.Manifest {
 	if m.selectedID == 0 {
 		return snapshot.Manifest{}
