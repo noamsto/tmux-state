@@ -686,6 +686,14 @@ func partitionRecoverable(evs []store.Event, ctxs map[int64]picker.CloseContext)
 // label + sub-manifest of the lost entity. Best-effort: events resolved by
 // neither get no map entry, and partitionRecoverable filters those out of the
 // picker as hidden.
+//
+// ScrollbackSkipped on the sub-manifest is prior's, not necessarily the
+// resolved item's: Resolve falls back to the entity embedded at capture time
+// precisely when prior can't be trusted for this event, and that embedded
+// entity may carry real scrollback of its own even though prior was
+// throttled. Propagating the flag unconditionally would then have the
+// preview call real scrollback "skipped". So it's only propagated when the
+// resolved item has no scrollback either — the one case it's still accurate.
 func buildCloseContexts(ctx context.Context, db *store.Store, evs []store.Event) map[int64]picker.CloseContext {
 	out := make(map[int64]picker.CloseContext, len(evs))
 	priorCache := map[int64]snapshot.Manifest{}
@@ -703,13 +711,30 @@ func buildCloseContexts(ctx context.Context, db *store.Store, evs []store.Event)
 		if !ok {
 			continue
 		}
+		sub := item.SubManifest(ev.Host, savedAt)
+		sub.ScrollbackSkipped = prior.ScrollbackSkipped && !subManifestHasScrollback(sub)
 		out[ev.ID] = picker.CloseContext{
 			Label:       item.Describe(),
 			Placement:   placementFor(closeMan, item),
-			SubManifest: item.SubManifest(ev.Host, savedAt),
+			SubManifest: sub,
 		}
 	}
 	return out
+}
+
+// subManifestHasScrollback reports whether any pane in m carries a captured
+// scrollback blob.
+func subManifestHasScrollback(m snapshot.Manifest) bool {
+	for _, sess := range m.Sessions {
+		for _, w := range sess.Windows {
+			for _, p := range w.Panes {
+				if p.ScrollbackSHA != "" {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // placementFor locates a resolved close in the tmux hierarchy for the picker's
