@@ -168,7 +168,10 @@ func (c SaveCmd) Run() error {
 		if err := saver.Save(ctx, c.Reason); err != nil {
 			return err
 		}
-		return db.PruneSnapshots(ctx, cfg.SnapshotHistoryLimit, time.Now().UnixMilli())
+		if err := db.PruneSnapshots(ctx, cfg.SnapshotHistoryLimit, time.Now().UnixMilli()); err != nil {
+			return err
+		}
+		return db.PruneCloseEvents(ctx, cfg.CloseEventLimit)
 	})
 }
 

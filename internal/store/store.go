@@ -266,7 +266,10 @@ func (s *Store) PruneSnapshots(ctx context.Context, keep int, nowMs int64) error
 	return nil
 }
 
-// PruneCloseEvents deletes non-snapshot events beyond the keep newest.
+// PruneCloseEvents deletes non-snapshot events beyond the keep newest, and
+// also those with no prior snapshot to resolve against (ts <= MIN(snapshot
+// ts)). When the store has no snapshots, MIN is NULL and that comparison
+// deletes nothing.
 func (s *Store) PruneCloseEvents(ctx context.Context, keep int) error {
 	_, err := s.db.ExecContext(ctx, `
 		DELETE FROM events
@@ -278,6 +281,14 @@ func (s *Store) PruneCloseEvents(ctx context.Context, keep int) error {
 		      LIMIT ?
 		  )
 	`, keep)
+	if err != nil {
+		return fmt.Errorf("prune close events: %w", err)
+	}
+	_, err = s.db.ExecContext(ctx, `
+		DELETE FROM events
+		WHERE kind != 'snapshot'
+		  AND ts <= (SELECT MIN(ts) FROM events WHERE kind = 'snapshot')
+	`)
 	if err != nil {
 		return fmt.Errorf("prune close events: %w", err)
 	}

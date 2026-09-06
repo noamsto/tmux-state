@@ -219,6 +219,108 @@ func TestPruneSnapshotsKeepsNewest(t *testing.T) {
 	}
 }
 
+func TestPruneCloseEventsKeepsNewest(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	ctx := context.Background()
+	db, err := store.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	for ts := int64(1); ts <= 10; ts++ {
+		if _, err := db.InsertEvent(ctx, store.Event{
+			Ts: ts, Kind: "pane-died", Scope: "session", Host: "h", ManifestJSON: "{}",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := db.PruneCloseEvents(ctx, 3); err != nil {
+		t.Fatal(err)
+	}
+
+	all, err := db.ListEvents(ctx, store.ListOpts{ExcludeKinds: []string{"snapshot"}, Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("got %d, want 3", len(all))
+	}
+	if all[0].Ts != 10 || all[1].Ts != 9 || all[2].Ts != 8 {
+		t.Errorf("expected newest 3 (10,9,8), got %d,%d,%d", all[0].Ts, all[1].Ts, all[2].Ts)
+	}
+}
+
+func TestPruneCloseEventsDropsUnresolvable(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	ctx := context.Background()
+	db, err := store.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	insert := func(ts int64, kind string) {
+		t.Helper()
+		if _, err := db.InsertEvent(ctx, store.Event{
+			Ts: ts, Kind: kind, Scope: "session", Host: "h", ManifestJSON: "{}",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	insert(100, "snapshot")
+	insert(200, "snapshot")
+	insert(50, "pane-died")
+	insert(150, "pane-died")
+	insert(250, "pane-died")
+
+	if err := db.PruneCloseEvents(ctx, 50); err != nil {
+		t.Fatal(err)
+	}
+
+	closes, err := db.ListEvents(ctx, store.ListOpts{ExcludeKinds: []string{"snapshot"}, Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(closes) != 2 {
+		t.Fatalf("got %d closes, want 2", len(closes))
+	}
+	if closes[0].Ts != 250 || closes[1].Ts != 150 {
+		t.Errorf("expected ts=250,150, got %d,%d", closes[0].Ts, closes[1].Ts)
+	}
+}
+
+func TestPruneCloseEventsKeepsAllWhenNoSnapshots(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	ctx := context.Background()
+	db, err := store.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	for _, ts := range []int64{50, 150, 250} {
+		if _, err := db.InsertEvent(ctx, store.Event{
+			Ts: ts, Kind: "pane-died", Scope: "session", Host: "h", ManifestJSON: "{}",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := db.PruneCloseEvents(ctx, 50); err != nil {
+		t.Fatal(err)
+	}
+
+	closes, err := db.ListEvents(ctx, store.ListOpts{ExcludeKinds: []string{"snapshot"}, Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(closes) != 3 {
+		t.Fatalf("got %d closes, want 3", len(closes))
+	}
+}
+
 func TestUpsertScrollbackIncrementsRefcount(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	ctx := context.Background()
