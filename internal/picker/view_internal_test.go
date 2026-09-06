@@ -8,6 +8,8 @@ import (
 	"unicode/utf8"
 
 	"charm.land/bubbles/v2/help"
+	"charm.land/bubbles/v2/key"
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/noamsto/tmux-remux/internal/closeevent"
@@ -1100,6 +1102,63 @@ func TestCloseMode_NeverAdvertisesExpandOrCollapse(t *testing.T) {
 		if !strings.Contains(out, desc) {
 			t.Errorf("snapshot help overlay dropped %q:\n%s", desc, out)
 		}
+	}
+}
+
+// Close mode restores the closed entity whole: nothing on that path reads the
+// filter, and only the snapshot list dims by age — so the three toggles and
+// the pane counter they drive must appear on no close-mode surface, and the
+// keys must move nothing. Snapshot mode, which they do drive, keeps all four.
+func TestCloseMode_NeverAdvertisesFiltersOrTheCounter(t *testing.T) {
+	applyTheme(NewTheme())
+	toggles := []key.Binding{defaultKeys().ToggleIdle, defaultKeys().ToggleSkipRunning, defaultKeys().ToggleAge}
+
+	m := closeListModel(t, 4)
+	m.width, m.height = 160, 40
+	for _, surface := range []struct{ name, text string }{
+		{"footer", stripANSI(m.renderFooter(m.width))},
+		{"help overlay", stripANSI(withHelpShown(m).View().Content)},
+	} {
+		for _, b := range toggles {
+			if h := b.Help(); strings.Contains(surface.text, h.Key+":") || strings.Contains(surface.text, h.Desc) {
+				t.Errorf("close mode %s advertises %q (%s):\n%s", surface.name, h.Key, h.Desc, surface.text)
+			}
+		}
+		if strings.Contains(surface.text, "panes /") {
+			t.Errorf("close mode %s carries the pane counter:\n%s", surface.name, surface.text)
+		}
+	}
+
+	// Checked against what the keys do, not just what the surfaces say.
+	before := m
+	for _, b := range toggles {
+		u, _ := m.Update(tea.KeyPressMsg{Code: rune(b.Keys()[0][0])})
+		m = u.(PickerModel)
+	}
+	if m.filter.SkipIdleShells != before.filter.SkipIdleShells ||
+		m.filter.SkipRunningSessions != before.filter.SkipRunningSessions ||
+		m.dimOlderThan != before.dimOlderThan {
+		t.Errorf("close mode toggles moved state: filter %+v→%+v, dim %v→%v",
+			before.filter, m.filter, before.dimOlderThan, m.dimOlderThan)
+	}
+
+	snap := NewPickerModel(ModeSnapshot, []store.Event{{ID: 1, Kind: "snapshot",
+		ManifestJSON: `{"v":1,"sessions":[{"name":"s","windows":[{"name":"w","panes":[{"index":0,"command":"fish"}]}]}]}`}}, nil, nil)
+	snap.width, snap.height = 160, 40
+	snap.Bootstrap()
+	foot := stripANSI(snap.renderFooter(snap.width))
+	overlay := stripANSI(withHelpShown(snap).View().Content)
+	for _, b := range toggles {
+		h := b.Help()
+		if !strings.Contains(foot, h.Key+":") {
+			t.Errorf("snapshot footer dropped %q (%s):\n%s", h.Key, h.Desc, foot)
+		}
+		if !strings.Contains(overlay, h.Desc) {
+			t.Errorf("snapshot help overlay dropped %q:\n%s", h.Desc, overlay)
+		}
+	}
+	if !strings.Contains(foot, "1 panes / 0 skipped") {
+		t.Errorf("snapshot footer dropped the pane counter:\n%s", foot)
 	}
 }
 

@@ -82,8 +82,8 @@ func (m PickerModel) View() tea.View {
 	return v
 }
 
-// renderFooter renders the footer bar with toggle indicators, pane counter, and
-// an optional transient warning note. Format: `key:value` pairs in lavender +
+// renderFooter renders the footer bar with the keys that act on the current
+// mode and an optional transient warning note. Format: `key:value` pairs in lavender +
 // state color, separated by a dim "·" so the eye can lock onto each pair.
 func (m PickerModel) renderFooter(width int) string {
 	// Key/desc come from the bindings themselves, so a rebind can't leave the
@@ -102,16 +102,22 @@ func (m PickerModel) renderFooter(width int) string {
 	}
 	sep := footerSep.Render(" · ")
 
-	c := m.CurrentCounts()
-	counter := fmt.Sprintf("%d panes / %d skipped", c.KeptPanes, c.SkippedPanes)
-
-	parts := []string{
-		toggle(m.filter.SkipIdleShells, m.keys.ToggleIdle),
-		toggle(m.filter.SkipRunningSessions, m.keys.ToggleSkipRunning),
-		toggle(m.dimOlderThan > 0, m.keys.ToggleAge),
-		counter,
-		hint(m.keys.Enter),
+	var parts []string
+	// The three filter toggles and the pane counter are snapshot mode's alone.
+	// Close mode restores the closed entity whole — nothing on that path reads
+	// m.filter, and the age toggle only dims snapshot rows — so in close mode
+	// all four would sit in front of ↵:restore describing nothing. The close
+	// preview's header carries the truthful count instead.
+	if m.mode == ModeSnapshot {
+		c := m.CurrentCounts()
+		parts = append(parts,
+			toggle(m.filter.SkipIdleShells, m.keys.ToggleIdle),
+			toggle(m.filter.SkipRunningSessions, m.keys.ToggleSkipRunning),
+			toggle(m.dimOlderThan > 0, m.keys.ToggleAge),
+			fmt.Sprintf("%d panes / %d skipped", c.KeptPanes, c.SkippedPanes),
+		)
 	}
+	parts = append(parts, hint(m.keys.Enter))
 	// Tab reaches snapshot mode's sub-manifest tree; close mode has no second
 	// tree, and its preview scrolls with Alt+j/k regardless of focus. A
 	// stacked preview is still a preview, so close mode advertises the scroll

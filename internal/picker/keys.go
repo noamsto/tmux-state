@@ -44,9 +44,10 @@ func defaultKeys() keyMap {
 
 // ShortHelp / FullHelp satisfy bubbles' help.KeyMap. Only FullHelp reaches a
 // frame — the `?` overlay forces ShowAll and the footer writes its own hints —
-// but both must agree, so both drop Tab and the expand/collapse pair in close
-// mode, where all three are inert: the close list is one level deep and its
-// handler answers only Up, Down and Enter.
+// but both must agree, so both drop Tab, the expand/collapse pair and the
+// three filter toggles in close mode, where all six are inert: the close list
+// is one level deep, its handler answers only Up, Down and Enter, and its
+// restore path never reads the filter.
 func (k keyMap) ShortHelp() []key.Binding {
 	if k.mode == ModeClose {
 		return []key.Binding{k.Up, k.Down, k.Enter, k.Help, k.Quit}
@@ -59,10 +60,12 @@ func (k keyMap) FullHelp() [][]key.Binding {
 	if k.mode != ModeClose {
 		nav = append(nav, k.Left, k.Right, k.Tab)
 	}
-	return [][]key.Binding{
+	groups := [][]key.Binding{
 		nav,
 		{k.PreviewUp, k.PreviewDown, k.PreviewLeft, k.PreviewRight},
-		{k.ToggleIdle, k.ToggleSkipRunning, k.ToggleAge},
-		{k.Enter, k.Help, k.Quit},
 	}
+	if k.mode != ModeClose {
+		groups = append(groups, []key.Binding{k.ToggleIdle, k.ToggleSkipRunning, k.ToggleAge})
+	}
+	return append(groups, []key.Binding{k.Enter, k.Help, k.Quit})
 }

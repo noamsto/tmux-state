@@ -339,7 +339,6 @@ func (m PickerModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				m.cursor = idx
 				m.previewScroll = 0
 				m.previewScrollX = 0
-				(&m).ensureManifest()
 			}
 			return m, (&m).PreviewCmd()
 		case key.Matches(msg, m.keys.Down):
@@ -347,7 +346,6 @@ func (m PickerModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				m.cursor = idx
 				m.previewScroll = 0
 				m.previewScrollX = 0
-				(&m).ensureManifest()
 			}
 			return m, (&m).PreviewCmd()
 		case key.Matches(msg, m.keys.Enter):
@@ -489,15 +487,19 @@ func (m PickerModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, (&m).PreviewCmd()
-	case key.Matches(msg, m.keys.ToggleIdle):
+	// The three filter toggles are snapshot mode's: close mode's restore path
+	// never reads m.filter, and only the snapshot list dims by age. Gated here
+	// rather than left to fall through, so that the footer and the `?` overlay
+	// — which drop all three in close mode — describe what the keys really do.
+	case m.mode == ModeSnapshot && key.Matches(msg, m.keys.ToggleIdle):
 		m.filter.SkipIdleShells = !m.filter.SkipIdleShells
 		(&m).redecorate()
 		return m, nil
-	case key.Matches(msg, m.keys.ToggleSkipRunning):
+	case m.mode == ModeSnapshot && key.Matches(msg, m.keys.ToggleSkipRunning):
 		m.filter.SkipRunningSessions = !m.filter.SkipRunningSessions
 		(&m).redecorate()
 		return m, nil
-	case key.Matches(msg, m.keys.ToggleAge):
+	case m.mode == ModeSnapshot && key.Matches(msg, m.keys.ToggleAge):
 		if m.dimOlderThan == 0 {
 			m.dimOlderThan = 24 * time.Hour
 		} else {
@@ -759,7 +761,16 @@ func (m PickerModel) closeCursorSHAs() []string {
 // ensureManifest parses + builds + decorates the tree for the cursor's event,
 // caching the result. No-op on cache hit. Records parse errors in
 // m.manifestErrors so View can render "(invalid manifest)".
+//
+// Snapshot mode only: every reader of m.manifests and m.trees — the tree pane,
+// the pane preview, the footer counter and Enter's manifest check — is behind a
+// snapshot-mode branch. Close mode restores and previews from closeContexts,
+// and its cursor indexes closeRows rather than m.events, so there is nothing
+// here for it to parse.
 func (m *PickerModel) ensureManifest() {
+	if m.mode == ModeClose {
+		return
+	}
 	id := m.CurrentEventID()
 	if id == 0 {
 		return
@@ -770,24 +781,10 @@ func (m *PickerModel) ensureManifest() {
 	if _, bad := m.manifestErrors[id]; bad {
 		return
 	}
-	var man snapshot.Manifest
-	if m.mode == ModeClose {
-		// Close events store their post-close index, not a snapshot manifest.
-		// Use the diff-derived sub-manifest (set via SetCloseContexts) so the
-		// tree pane shows what was lost rather than an empty event.
-		man = m.closeContexts[id].SubManifest
-		if len(man.Sessions) == 0 {
-			m.manifestErrors[id] = fmt.Errorf("close event has no recoverable entity")
-			return
-		}
-	} else {
-		ev := m.events[m.cursor]
-		var err error
-		man, err = parseEventManifest(ev)
-		if err != nil {
-			m.manifestErrors[id] = err
-			return
-		}
+	man, err := parseEventManifest(m.events[m.cursor])
+	if err != nil {
+		m.manifestErrors[id] = err
+		return
 	}
 	m.manifests[id] = man
 	tree := BuildTree(man)
