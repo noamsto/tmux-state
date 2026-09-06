@@ -154,8 +154,17 @@ Check every consumer of `SubManifest` before changing it: `restoreSentence`, `pa
 **3b. Rewrite the close preview.** Delete the pane map from close mode — `renderWindowMap` stays for snapshot mode, which still has multi-pane windows. In its place:
 
 - Header: what this close was and when. Two lines, e.g. `halo-nix-amd-ai:1 · nix-amd-ai` then `window close · 2 panes · closed 2d ago`.
-- Body: the scrollback of **every pane the close took down**. One pane fills the panel. Two stack, each under a full-width rule naming it — `── <index> · <command> ──` — with the available height divided between them.
+- Body: the scrollback of **every pane the close took down**. One pane fills the panel. Two stack, with the available height divided between them.
 - A pane with no captured scrollback says so in its own slot rather than leaving it blank.
+
+**Pane boundaries — a thin rule is not good enough, and this is a measured requirement, not a preference.** The captured scrollback contains its own horizontal rules and box-drawn status bars (visible in the real renders: the agent sessions print `──────────` separators). Chrome that is also a thin rule is indistinguishable from content. Each pane's block therefore gets:
+
+- A **filled label bar** across the panel width carrying `<index> · <command>` and a position marker (`1 of 2`).
+- A **coloured left rail** — a gutter glyph on *every* content row of that pane's block, not just at the boundary — so the block identity is readable from any row, including mid-scroll and where the content prints its own rules.
+- A **different accent colour per pane**, so two blocks are distinguishable without reading the labels.
+- Content **inset one column** and truncated to the remaining width, so it can never write into the rail. This is the property that makes the rail trustworthy: content can fake any glyph, but it cannot reach a column it is not given.
+
+Compose the rail and the content as separate styled strings concatenated together — do **not** wrap a line that already carries the content's own SGR inside another style, per the global constraint above.
 - Drop the `↵ reopens …` sentence added in #103. The row's `→ target` column says it now.
 - Keep the existing sanitisation and the scrollback loading lifecycle (`previewSHA` / `PreviewCmd` / `scrollbackLoadedMsg`). Both panes of a two-pane close need their scrollback scheduled, so `previewSHA` returning a single hash is no longer sufficient — widen it, and keep the in-flight bookkeeping correct so no path can hang on `(loading scrollback…)`.
 
