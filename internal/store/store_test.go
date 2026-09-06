@@ -236,7 +236,7 @@ func TestPruneCloseEventsKeepsNewest(t *testing.T) {
 		}
 	}
 
-	if err := db.PruneCloseEvents(ctx, 3); err != nil {
+	if _, err := db.PruneCloseEvents(ctx, 3); err != nil {
 		t.Fatal(err)
 	}
 
@@ -276,7 +276,7 @@ func TestPruneCloseEventsDropsUnresolvable(t *testing.T) {
 	insert(150, "pane-died")
 	insert(250, "pane-died")
 
-	if err := db.PruneCloseEvents(ctx, 50); err != nil {
+	if _, err := db.PruneCloseEvents(ctx, 50); err != nil {
 		t.Fatal(err)
 	}
 
@@ -309,7 +309,7 @@ func TestPruneCloseEventsKeepsAllWhenNoSnapshots(t *testing.T) {
 		}
 	}
 
-	if err := db.PruneCloseEvents(ctx, 50); err != nil {
+	if _, err := db.PruneCloseEvents(ctx, 50); err != nil {
 		t.Fatal(err)
 	}
 
@@ -319,6 +319,42 @@ func TestPruneCloseEventsKeepsAllWhenNoSnapshots(t *testing.T) {
 	}
 	if len(closes) != 3 {
 		t.Fatalf("got %d closes, want 3", len(closes))
+	}
+}
+
+func TestPruneUnresolvableCloseEventsKeepsResolvable(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	ctx := context.Background()
+	db, err := store.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if _, err := db.InsertEvent(ctx, store.Event{
+		Ts: 100, Kind: "snapshot", Scope: "session", Host: "h", ManifestJSON: "{}",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	const want = 60
+	for ts := int64(101); ts <= 100+want; ts++ {
+		if _, err := db.InsertEvent(ctx, store.Event{
+			Ts: ts, Kind: "pane-died", Scope: "session", Host: "h", ManifestJSON: "{}",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if _, err := db.PruneUnresolvableCloseEvents(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	closes, err := db.ListEvents(ctx, store.ListOpts{ExcludeKinds: []string{"snapshot"}, Limit: 200})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(closes) != want {
+		t.Fatalf("got %d closes, want %d", len(closes), want)
 	}
 }
 
