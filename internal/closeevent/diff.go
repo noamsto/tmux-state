@@ -90,18 +90,25 @@ func (c *ClosedItem) Describe() string {
 }
 
 // SubManifest builds a snapshot.Manifest containing only the closed entity,
-// suitable for restore.BuildPlan. Returns an empty manifest if c is nil.
+// suitable for restore.BuildPlan. A pane close yields its enclosing window
+// carrying just the pane that died — the window is what a restore needs to
+// place the pane back into, but its surviving siblings were not lost.
+// Returns an empty manifest if c is nil.
 func (c *ClosedItem) SubManifest(host string, savedAt int64) snapshot.Manifest {
 	m := snapshot.Manifest{V: 1, Host: host, SavedAt: savedAt}
 	if c == nil {
 		return m
 	}
-	// A pane-died carries its parent Window, so the Window branch covers it:
-	// the sub-manifest is the whole enclosing window (used to recreate it when
-	// it's fully gone, and by the picker).
+	// Pane is checked before Window: a pane-died carries both, and only the
+	// pane that died was lost — its siblings are still running, so listing
+	// them here would report them as casualties of this close.
 	switch {
 	case c.Session != nil:
 		m.Sessions = []snapshot.Session{*c.Session}
+	case c.Pane != nil:
+		w := *c.Window
+		w.Panes = []snapshot.Pane{*c.Pane}
+		m.Sessions = []snapshot.Session{{Name: c.SessionName, Windows: []snapshot.Window{w}}}
 	case c.Window != nil:
 		m.Sessions = []snapshot.Session{{
 			Name:    c.SessionName,

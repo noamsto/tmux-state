@@ -204,3 +204,37 @@ func TestSubManifest_RoundTripsForRestore(t *testing.T) {
 		t.Errorf("got windows %+v, want one window with Index=2", m.Sessions[0].Windows)
 	}
 }
+
+func TestSubManifest_PaneScopeCarriesOnlyTheDiedPane(t *testing.T) {
+	win := &snapshot.Window{
+		Index: 2, Name: "logs", ID: "@1",
+		Panes: []snapshot.Pane{
+			{Index: 1, ID: "%1", Command: "claude", Cwd: "/x"},
+			{Index: 2, ID: "%2", Command: "fish", Cwd: "/y"},
+		},
+	}
+	item := &closeevent.ClosedItem{
+		SessionName: "lazytmux",
+		Pane:        &win.Panes[1],
+		Window:      win,
+		WindowIndex: 2,
+	}
+	m := item.SubManifest("h", 100)
+	if len(m.Sessions) != 1 || len(m.Sessions[0].Windows) != 1 {
+		t.Fatalf("want one session with one window, got %+v", m.Sessions)
+	}
+	w := m.Sessions[0].Windows[0]
+	if w.Index != 2 || w.Name != "logs" {
+		t.Errorf("got window %d/%q, want 2/logs", w.Index, w.Name)
+	}
+	if len(w.Panes) != 1 {
+		t.Fatalf("want only the died pane, got %+v", w.Panes)
+	}
+	if w.Panes[0].ID != "%2" {
+		t.Errorf("got pane %q, want the died pane %%2", w.Panes[0].ID)
+	}
+	// The prior snapshot is shared with the restore path; narrowing must copy.
+	if len(win.Panes) != 2 {
+		t.Errorf("SubManifest mutated the source window: %+v", win.Panes)
+	}
+}

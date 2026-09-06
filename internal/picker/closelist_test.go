@@ -26,8 +26,9 @@ func windowCtx(session string, idx int, winName, cmd, cwd string) picker.CloseCo
 }
 
 // paneCtx builds a CloseContext for a pane-scope close: the enclosing window
-// (as today's SubManifest carries it) holding the died pane, identified by
-// paneID, alongside a sibling that must not affect collapsing.
+// holding the died pane, identified by paneID. The sibling is wider than
+// closeevent.SubManifest now produces, and is here so the id-based lookup
+// stays honest if a caller ever hands the picker the whole window again.
 func paneCtx(session string, idx int, winName, paneID, cmd, cwd string) picker.CloseContext {
 	return picker.CloseContext{
 		Placement: picker.ClosePlacement{

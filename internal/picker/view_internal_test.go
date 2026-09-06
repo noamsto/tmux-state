@@ -10,6 +10,7 @@ import (
 	"charm.land/bubbles/v2/help"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/noamsto/tmux-remux/internal/closeevent"
 	"github.com/noamsto/tmux-remux/internal/snapshot"
 	"github.com/noamsto/tmux-remux/internal/store"
 )
@@ -928,5 +929,30 @@ func TestCloseListRow_CwdYieldsBeforeTheName(t *testing.T) {
 	}
 	if !strings.Contains(tight, name) {
 		t.Errorf("name should survive intact at 56, got %q", tight)
+	}
+}
+
+// A pane close recorded without a pane id (the positional-fallback path in
+// closeevent.findClosedPane) has no id to look the died pane up by, so the row
+// falls back to the sub-manifest's first pane. That is only the right answer
+// because SubManifest now narrows a pane close to the pane that died.
+func TestClosedPaneInfo_NoPaneIDReportsTheDiedPane(t *testing.T) {
+	win := &snapshot.Window{
+		Index: 2, Name: "logs", ID: "@1",
+		Panes: []snapshot.Pane{
+			{Index: 1, ID: "%1", Command: "claude", Cwd: "/x"},
+			{Index: 2, ID: "%2", Command: "fish", Cwd: "/y"},
+		},
+	}
+	item := &closeevent.ClosedItem{
+		SessionName: "lazytmux", Pane: &win.Panes[1], Window: win, WindowIndex: 2,
+	}
+	cc := CloseContext{
+		Placement:   ClosePlacement{Session: "lazytmux", WindowIndex: 2, WindowName: "logs", Scope: "pane"},
+		SubManifest: item.SubManifest("h", 100),
+	}
+	cmd, cwd := closedPaneInfo(cc)
+	if cmd != "fish" || cwd != "/y" {
+		t.Errorf("got %q %q, want fish /y (the pane that died)", cmd, cwd)
 	}
 }
