@@ -87,12 +87,10 @@ func TestBuildCloseContextsPropagatesScrollbackSkipped(t *testing.T) {
 	}
 }
 
-// When Resolve falls back to the entity embedded at capture time, that
-// entity's own scrollback — not the freshly looked-up prior's throttle status
-// — must decide whether the preview says "scrollback skipped": the embedded
-// entity can carry real scrollback even though the current prior was
-// throttled (it was resolved against a different, since-superseded snapshot).
-// Claiming "skipped" here would contradict the scrollback actually shown.
+// An embedded entity resolved via the capture-time fallback can carry real
+// scrollback even though the freshly looked-up prior snapshot was throttled
+// — they can come from different snapshots. The sub-manifest must reflect
+// the embedded entity's own scrollback, not prior's throttle status.
 func TestBuildCloseContextsScrollbackSkippedReflectsResolvedItem(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "test.db"))

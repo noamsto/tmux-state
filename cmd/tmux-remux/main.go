@@ -687,19 +687,11 @@ func partitionRecoverable(evs []store.Event, ctxs map[int64]picker.CloseContext)
 // neither get no map entry, and partitionRecoverable filters those out of the
 // picker as hidden.
 //
-// ScrollbackSkipped on the sub-manifest is prior's, not necessarily the
-// resolved item's: Resolve falls back to the entity embedded at capture time
-// precisely when prior can't be trusted for this event, and that embedded
-// entity may carry real scrollback of its own even though prior — a
-// different, freshly re-looked-up snapshot — was throttled. Propagating the
-// flag unconditionally would then have the preview call real scrollback
-// "skipped", which is always wrong, so it's suppressed whenever the resolved
-// item has scrollback of its own. When the resolved item has none either,
-// the flag is still propagated: on the embedded path this only says a
-// throttled snapshot exists near this close, not that it's the reason this
-// particular item lacks scrollback, but that's the accepted approximation —
-// a real, if imprecise, explanation beats "(no scrollback captured for this
-// pane)" with no explanation at all.
+// ScrollbackSkipped on the sub-manifest reflects prior, the freshly
+// re-looked-up snapshot — not necessarily the item Resolve actually returned.
+// On the embedded-entity fallback path, prior can be a different, unrelated
+// snapshot, so its throttle flag is cleared whenever the resolved item
+// carries scrollback of its own; otherwise it's propagated as-is.
 func buildCloseContexts(ctx context.Context, db *store.Store, evs []store.Event) map[int64]picker.CloseContext {
 	out := make(map[int64]picker.CloseContext, len(evs))
 	priorCache := map[int64]snapshot.Manifest{}
