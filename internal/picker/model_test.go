@@ -490,3 +490,103 @@ func TestModel_CloseLeftCollapsesAncestorAndLandsNavigable(t *testing.T) {
 		t.Errorf("Left left the cursor on scaffolding row %q", n.Label)
 	}
 }
+
+// closeRowsModel builds a close-mode picker over #104's flat row list via
+// SetCloseRows rather than SetCloseTree: THIS SESSION (newest first: events
+// 1, 2) then OTHER SESSIONS (event 3). Each event's context carries a real
+// pane with a ScrollbackSHA so the preview-loading tests have something to
+// schedule.
+func closeRowsModel(t *testing.T, sb *scrollback.Store) picker.PickerModel {
+	t.Helper()
+	subManifest := func(session, sha string) snapshot.Manifest {
+		return snapshot.Manifest{Sessions: []snapshot.Session{{
+			Name: session,
+			Windows: []snapshot.Window{{
+				Index: 1, Name: "win",
+				Panes: []snapshot.Pane{{Index: 1, ID: "%1", Command: "fish", ScrollbackSHA: sha}},
+			}},
+		}}}
+	}
+	ctxs := map[int64]picker.CloseContext{
+		1: {Placement: picker.ClosePlacement{Session: "mono", WindowIndex: 1, Scope: "window"}, SubManifest: subManifest("mono", "sha1")},
+		2: {Placement: picker.ClosePlacement{Session: "mono", WindowIndex: 2, Scope: "window"}, SubManifest: subManifest("mono", "sha2")},
+		3: {Placement: picker.ClosePlacement{Session: "lazytmux", WindowIndex: 1, Scope: "window"}, SubManifest: subManifest("lazytmux", "sha3")},
+	}
+	rows := []picker.CloseRow{
+		{Kind: picker.RowSectionHeader, Section: "THIS SESSION · mono"},
+		{Kind: picker.RowClose, EventID: 1, Ts: 300, Scope: "window", Session: "mono"},
+		{Kind: picker.RowClose, EventID: 2, Ts: 200, Scope: "window", Session: "mono"},
+		{Kind: picker.RowSectionHeader, Section: "OTHER SESSIONS"},
+		{Kind: picker.RowClose, EventID: 3, Ts: 100, Scope: "window", Session: "lazytmux"},
+	}
+	m := picker.NewPickerModel(picker.ModeClose, nil, nil, sb)
+	m.SetCloseContexts(ctxs)
+	m.SetCloseRows(rows)
+	m.Bootstrap()
+	return m
+}
+
+func TestModel_CloseRowsCursorStartsOnNewestSelectableClose(t *testing.T) {
+	m := closeRowsModel(t, nil)
+	if got := m.CurrentEventID(); got != 1 {
+		t.Errorf("CurrentEventID = %d, want 1 (newest close)", got)
+	}
+}
+
+func TestModel_CloseRowsUpDownSkipHeaders(t *testing.T) {
+	m := closeRowsModel(t, nil)
+	upd, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	pm := upd.(picker.PickerModel)
+	if got := pm.CurrentEventID(); got != 2 {
+		t.Fatalf("after Down, CurrentEventID = %d, want 2", got)
+	}
+	upd, _ = pm.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	pm = upd.(picker.PickerModel)
+	if got := pm.CurrentEventID(); got != 3 {
+		t.Fatalf("after second Down, CurrentEventID = %d, want 3 (stepping over the OTHER SESSIONS header)", got)
+	}
+	upd, _ = pm.Update(tea.KeyPressMsg{Code: tea.KeyUp})
+	pm = upd.(picker.PickerModel)
+	if got := pm.CurrentEventID(); got != 2 {
+		t.Fatalf("after Up, CurrentEventID = %d, want 2 (stepping back over the header)", got)
+	}
+}
+
+func TestModel_CloseRowsLeftRightAreInert(t *testing.T) {
+	m := closeRowsModel(t, nil)
+	before := m.Cursor()
+	for _, code := range []rune{tea.KeyLeft, tea.KeyRight} {
+		upd, cmd := m.Update(tea.KeyPressMsg{Code: code})
+		pm := upd.(picker.PickerModel)
+		if pm.Cursor() != before {
+			t.Errorf("key %v moved the cursor: %d -> %d", code, before, pm.Cursor())
+		}
+		if cmd != nil {
+			t.Errorf("key %v returned a command; the flat list has nothing to expand or collapse", code)
+		}
+	}
+}
+
+func TestModel_CloseRowsEnterSelectsNewestClose(t *testing.T) {
+	m := closeRowsModel(t, nil)
+	upd, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	pm := upd.(picker.PickerModel)
+	if pm.SelectedID() != 1 {
+		t.Errorf("SelectedID = %d, want 1 (the newest close)", pm.SelectedID())
+	}
+	if cmd == nil {
+		t.Error("Enter on a selectable row should quit the program")
+	}
+}
+
+// #103 fixed a regression where nothing scheduled the cursor's scrollback
+// load until the first key arrived, leaving the first frame's preview blank
+// even though the scrollback existed. Bootstrap+Init must keep scheduling it
+// for the flat list too.
+func TestModel_CloseRowsInitSchedulesFirstScrollbackLoad(t *testing.T) {
+	sb := scrollback.New(t.TempDir())
+	m := closeRowsModel(t, sb)
+	if cmd := m.Init(); cmd == nil {
+		t.Fatal("Init scheduled no load for the initial close row's scrollback")
+	}
+}

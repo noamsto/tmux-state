@@ -75,6 +75,13 @@ type PickerModel struct {
 	// closeTree is the grouped close hierarchy rendered in close mode. When
 	// set, m.cursor indexes FlattenClose(closeTree) rather than m.events.
 	closeTree *CloseNode
+	// closeRows is #104's flat, newest-first replacement for closeTree. When
+	// set, m.cursor indexes closeRows and takes priority over closeTree — the
+	// two are never both meaningful at once, but closeRows wins so callers can
+	// migrate one setter at a time. Nil until SetCloseRows is called; View and
+	// main.go don't populate it yet (that's #104's later tasks), so today it's
+	// only reachable in tests.
+	closeRows []CloseRow
 	// hiddenCount is the number of unrecoverable close events the caller
 	// filtered out before constructing the model. Rendered as a footer line so
 	// the user knows the list is pruned. Close mode only.
@@ -324,9 +331,41 @@ func (m PickerModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// recoverable row. Handlers that want to surface a fresh note set it
 	// after this clear.
 	m.footerNote = ""
-	// Close mode with a grouped tree: the cursor walks tree rows, so Up/Down
-	// skip headers and Left/Right collapse and expand them.
-	if m.mode == ModeClose && m.closeTree != nil && m.focus == focusList {
+	// Close mode with the flat row list (#104): the cursor walks CloseRows,
+	// skipping section headers. There's no hierarchy to expand or collapse,
+	// so Left/Right fall through unhandled — the flat list's whole nav story
+	// is Up/Down/Enter.
+	if m.mode == ModeClose && len(m.closeRows) > 0 && m.focus == focusList {
+		switch {
+		case key.Matches(msg, m.keys.Up):
+			if idx := m.nextCloseRowIdx(m.cursor, -1); idx >= 0 {
+				m.cursor = idx
+				m.previewScroll = 0
+				m.previewScrollX = 0
+				(&m).ensureManifest()
+			}
+			return m, (&m).PreviewCmd()
+		case key.Matches(msg, m.keys.Down):
+			if idx := m.nextCloseRowIdx(m.cursor, +1); idx >= 0 {
+				m.cursor = idx
+				m.previewScroll = 0
+				m.previewScrollX = 0
+				(&m).ensureManifest()
+			}
+			return m, (&m).PreviewCmd()
+		case key.Matches(msg, m.keys.Enter):
+			if m.cursor < 0 || m.cursor >= len(m.closeRows) {
+				return m, nil
+			}
+			// Every selectable row carries an EventID and Up/Down never stop
+			// on a header, so there's nothing left for Enter to refuse.
+			if id := m.closeRows[m.cursor].EventID; id != 0 {
+				m.selectedID = id
+				return m, tea.Quit
+			}
+			return m, nil
+		}
+	} else if m.mode == ModeClose && m.closeTree != nil && m.focus == focusList {
 		vis := m.CloseVisible()
 		switch {
 		case key.Matches(msg, m.keys.Up):
@@ -562,8 +601,13 @@ func (m *PickerModel) redecorate() {
 // after construction; the cobra wiring does this so View has data on first
 // render. Idempotent.
 func (m *PickerModel) Bootstrap() {
-	if m.mode == ModeClose && m.closeTree != nil {
-		m.cursor = m.firstCloseTarget()
+	if m.mode == ModeClose {
+		switch {
+		case len(m.closeRows) > 0:
+			m.cursor = firstSelectableCloseRow(m.closeRows)
+		case m.closeTree != nil:
+			m.cursor = m.firstCloseTarget()
+		}
 	}
 	m.ensureManifest()
 }
@@ -639,6 +683,13 @@ func (m *PickerModel) SetCloseTree(root *CloseNode) {
 	m.closeTree = root
 }
 
+// SetCloseRows attaches the flat, newest-first close list (#104's replacement
+// for the grouped tree). Call between NewPickerModel and Bootstrap. Close
+// mode only. Takes priority over a tree set via SetCloseTree.
+func (m *PickerModel) SetCloseRows(rows []CloseRow) {
+	m.closeRows = rows
+}
+
 // SetCursor moves the cursor. Exported for tests; production code moves the
 // cursor through key handling.
 func (m *PickerModel) SetCursor(i int) { m.cursor = i }
@@ -649,6 +700,12 @@ func (m PickerModel) CloseVisible() []*CloseNode { return FlattenClose(m.closeTr
 // CurrentEventID returns the event id under the cursor, or 0 when the cursor is
 // on a grouping header or there is nothing to point at.
 func (m PickerModel) CurrentEventID() int64 {
+	if len(m.closeRows) > 0 {
+		if m.cursor < 0 || m.cursor >= len(m.closeRows) {
+			return 0
+		}
+		return m.closeRows[m.cursor].EventID
+	}
 	if m.closeTree == nil {
 		if m.cursor < 0 || m.cursor >= len(m.events) {
 			return 0
@@ -723,6 +780,31 @@ func closeNavAt(vis []*CloseNode, idx int) int {
 	return 0
 }
 
+// nextCloseRowIdx walks from start in dir (+1/-1) over m.closeRows to the
+// next selectable row, or -1 when there is none that way. The flat list has
+// no hierarchy to expand or collapse, so unlike nextCloseIdx this is the
+// entire close-mode nav story: no ancestor walk, no group-header stop.
+func (m PickerModel) nextCloseRowIdx(start, dir int) int {
+	for i := start + dir; i >= 0 && i < len(m.closeRows); i += dir {
+		if m.closeRows[i].Selectable() {
+			return i
+		}
+	}
+	return -1
+}
+
+// firstSelectableCloseRow returns the index of the first selectable row in
+// rows — the newest close, since BuildCloseList sorts each section
+// newest-first — or 0 when rows has no selectable row at all.
+func firstSelectableCloseRow(rows []CloseRow) int {
+	for i, r := range rows {
+		if r.Selectable() {
+			return i
+		}
+	}
+	return 0
+}
+
 // CloseContextFor returns the cached close context for the given event ID,
 // or the zero-value CloseContext if absent.
 func (m PickerModel) CloseContextFor(id int64) CloseContext {
@@ -770,7 +852,7 @@ func (m *PickerModel) PreviewCmd() tea.Cmd {
 // the second block stuck on "(scrollback pending)"; snapshot mode shows one
 // pane and yields at most one.
 func (m PickerModel) previewSHAs() []string {
-	if m.mode == ModeClose && m.closeTree != nil {
+	if m.mode == ModeClose {
 		return m.closeCursorSHAs()
 	}
 	if sha := m.previewSHA(); sha != "" {
@@ -801,13 +883,11 @@ func (m PickerModel) previewSHA() string {
 }
 
 // closeCursorContext resolves the close context the cursor sits on, or the
-// zero value when it sits on a section header or out of range.
+// zero value when it sits on a section header or out of range. Routes
+// through CurrentEventID, which already knows whether the cursor indexes
+// closeRows or the tree.
 func (m PickerModel) closeCursorContext() CloseContext {
-	vis := m.CloseVisible()
-	if m.cursor < 0 || m.cursor >= len(vis) {
-		return CloseContext{}
-	}
-	return m.CloseContextFor(vis[m.cursor].EventID)
+	return m.CloseContextFor(m.CurrentEventID())
 }
 
 // closeCursorSHAs returns the scrollback hashes of every pane the cursor's
