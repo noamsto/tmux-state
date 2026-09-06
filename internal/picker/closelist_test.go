@@ -3,6 +3,7 @@ package picker_test
 import (
 	"testing"
 
+	"github.com/noamsto/tmux-remux/internal/closeevent"
 	"github.com/noamsto/tmux-remux/internal/picker"
 	"github.com/noamsto/tmux-remux/internal/snapshot"
 	"github.com/noamsto/tmux-remux/internal/store"
@@ -301,4 +302,26 @@ func equalStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// A close whose owning session could not be attributed still lists. It takes
+// closeevent's UnknownSession label rather than an empty one, and lands under
+// OTHER SESSIONS — the current session's header must never claim a close that
+// could not be attributed to it.
+func TestBuildCloseList_UnattributedCloseFallsBackToUnknownSession(t *testing.T) {
+	evs := []store.Event{{ID: 1, Ts: 100}}
+	ctxs := map[int64]picker.CloseContext{1: windowCtx("", 1, "shell", "fish", "/home/x")}
+
+	rows := picker.BuildCloseList(evs, ctxs, "mono")
+
+	if got, want := sections(rows), []string{"OTHER SESSIONS"}; !equalStrings(got, want) {
+		t.Fatalf("sections = %v, want %v", got, want)
+	}
+	closes := closeRows(rows)
+	if len(closes) != 1 {
+		t.Fatalf("close rows = %d, want 1", len(closes))
+	}
+	if got := closes[0].Session; got != closeevent.UnknownSession {
+		t.Errorf("Session = %q, want %q", got, closeevent.UnknownSession)
+	}
 }

@@ -968,7 +968,7 @@ func closePreviewFrameFixture(t *testing.T, scope string) PickerModel {
 }
 
 // TestRenderClosePreview_NeverOverflowsFrame guards renderClosePreview's box
-// math the same way TestRenderList/TestRenderCloseTree guard theirs: a
+// math the same way TestRenderList/TestRenderCloseList guard theirs: a
 // lipgloss frame pads short content but does not clip overflow, so a body
 // with more lines than previewInnerHeight() pushes the closing border past the
 // requested height. MaxHeight then hard-truncates the *line list*, so the

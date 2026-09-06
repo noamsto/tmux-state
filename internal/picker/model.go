@@ -352,13 +352,8 @@ func (m PickerModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			if m.cursor < 0 || m.cursor >= len(m.closeRows) {
 				return m, nil
 			}
-			// Every selectable row carries an EventID and Up/Down never stop
-			// on a header, so there's nothing left for Enter to refuse.
-			if id := m.closeRows[m.cursor].EventID; id != 0 {
-				m.selectedID = id
-				return m, tea.Quit
-			}
-			return m, nil
+			m.selectedID = m.closeRows[m.cursor].EventID
+			return m, tea.Quit
 		}
 	}
 	// Preview scroll: Alt+J/K / PgUp/PgDn — scroll up to read past output

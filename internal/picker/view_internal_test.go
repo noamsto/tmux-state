@@ -23,7 +23,7 @@ import (
 // line list, dropping the closing border rather than the excess — and desyncs
 // the sibling panes. Rendered output must be exactly width×height for every size — even a
 // narrow pane with a hidden-count footer pinned to the bottom. Per-row
-// truncation of a long label is covered by TestRenderCloseTree_NeverOverflowsFrame
+// truncation of a long label is covered by TestRenderCloseList_NeverOverflowsFrame
 // instead, since renderList's row format no longer reads a close-specific label.
 func TestRenderList_NeverOverflowsFrame(t *testing.T) {
 	applyTheme(NewTheme())
@@ -980,6 +980,17 @@ func TestView_CloseListFrameGeometry(t *testing.T) {
 			rows := strings.Split(out, "\n")
 			if got := strings.Count(rows[0], "╭"); got != want {
 				t.Errorf("w=%d h=%d: row 0 opens %d frames, want %d\n%s", w, h, got, want, out)
+			}
+			// Row 0 cannot see a frame stacked *under* the list, so count the
+			// whole output too: below 80 the preview is gone entirely (README
+			// promises the list gets the terminal), above it the preview
+			// exists either beside the list or under it, never both.
+			wantTotal := 2
+			if w < 80 {
+				wantTotal = 1
+			}
+			if got := strings.Count(out, "╭"); got != wantTotal {
+				t.Errorf("w=%d h=%d: frame opens %d times overall, want %d\n%s", w, h, got, wantTotal, out)
 			}
 			last := len(rows) - 1 - lipgloss.Height(m.renderFooter(w))
 			if got := strings.Count(rows[last], "╰"); got != want {
