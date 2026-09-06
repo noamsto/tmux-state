@@ -19,6 +19,16 @@ import (
 	"github.com/noamsto/tmux-remux/internal/store"
 )
 
+// closePreviewWidth returns the width View hands the close preview: the
+// preview column when it sits beside the list, the whole terminal when the
+// list is too narrow for both and it stacks underneath.
+func closePreviewWidth(m PickerModel) int {
+	if _, _, w := m.paneWidthsThree(); w > 0 {
+		return w
+	}
+	return m.width
+}
+
 func TestLoadScrollbackCmd_ReturnsContent(t *testing.T) {
 	tmp := t.TempDir()
 	sb := scrollback.New(tmp)
@@ -287,6 +297,55 @@ func TestRenderPreview_Error(t *testing.T) {
 	}
 }
 
+// TestRenderPreview_NeverOverflowsFrameWithWideRunesScrolled is the snapshot
+// mode counterpart of TestRenderClosePreview_NeverOverflowsFrameWithWideRunesScrolled:
+// renderPreview's plain-pane path calls the same previewWindow, so it shares
+// the same ansi.Cut overshoot and the same dropped closing border once
+// previewScrollX > 0 lands a double-width rune on a cut boundary. Nothing
+// about the snapshot path makes it immune — it is just less likely to be hit
+// by hand, since it additionally requires focusing a pane node in the tree.
+func TestRenderPreview_NeverOverflowsFrameWithWideRunesScrolled(t *testing.T) {
+	applyTheme(NewTheme())
+	man := snapshot.Manifest{V: 1, Sessions: []snapshot.Session{{
+		Windows: []snapshot.Window{{Panes: []snapshot.Pane{{ScrollbackSHA: "abc"}}}},
+	}}}
+	raw, _ := json.Marshal(man)
+	ev := store.Event{ID: 1, Kind: "snapshot", ManifestJSON: string(raw)}
+	m := NewPickerModel(ModeSnapshot, []store.Event{ev}, nil, nil)
+	m.Bootstrap()
+	m.focus = focusTree
+	m.treeCursor = paneNodeIndex(t, m)
+
+	var b strings.Builder
+	for i := 1; i <= 200; i++ {
+		fmt.Fprintf(&b, "行%d 日本語プロジェクトの内容漢字文字列テスト絵文字📁📂🎉 line %d with tail text long enough to overflow a narrow panel\n", i, i)
+	}
+	m.scrollbacks["abc"] = []byte(b.String())
+
+	widths := []int{60, 80, 86, 100, 120}
+	heights := []int{12, 20, 30}
+	for _, w := range widths {
+		for _, h := range heights {
+			for scrollX := 1; scrollX <= 40; scrollX++ {
+				m.width, m.height = w, h
+				m.previewScrollX = scrollX
+				out := m.renderPreview(w)
+				if got := lipgloss.Height(out); got != m.panelFrameHeight() {
+					t.Errorf("w=%d h=%d scrollX=%d: rendered height=%d, want %d", w, h, scrollX, got, m.panelFrameHeight())
+				}
+				if got := lipgloss.Width(out); got != w {
+					t.Errorf("w=%d h=%d scrollX=%d: rendered width=%d, want %d", w, h, scrollX, got, w)
+				}
+				rows := strings.Split(out, "\n")
+				last := rows[len(rows)-1]
+				if !strings.ContainsRune(last, '╰') || !strings.ContainsRune(last, '╯') {
+					t.Errorf("w=%d h=%d scrollX=%d: frame did not close, last row is %q\n%s", w, h, scrollX, last, out)
+				}
+			}
+		}
+	}
+}
+
 // stripANSI removes ANSI escapes for assertion ergonomics.
 func stripANSI(s string) string {
 	return ansiRegexp.ReplaceAllString(s, "")
@@ -310,7 +369,7 @@ func TestPickerModel_ClosePreviewsClosedPaneScrollback(t *testing.T) {
 	}
 	ev := store.Event{ID: 7, Kind: "pane-died", ManifestJSON: `{"pane_id":"%1"}`}
 
-	// A real close tree, because with one the cursor indexes close-tree rows
+	// A real close list, because in close mode the cursor indexes its rows
 	// rather than the event slice — the path production actually takes.
 	ctxs := map[int64]CloseContext{7: {
 		Label:       "pane",
@@ -319,12 +378,12 @@ func TestPickerModel_ClosePreviewsClosedPaneScrollback(t *testing.T) {
 	}}
 	m := NewPickerModel(ModeClose, []store.Event{ev}, nil, scrollback.New(t.TempDir()))
 	m.SetCloseContexts(ctxs)
-	m.SetCloseTree(BuildCloseTree([]store.Event{ev}, ctxs, "demo", nil))
+	m.SetCloseRows(BuildCloseList([]store.Event{ev}, ctxs, "demo"))
 	m.Bootstrap()
 	m.width, m.height = 130, 20
 	m.scrollbacks[sha] = []byte("step 34: reading files…")
 
-	_, _, previewWidth := m.paneWidthsThree()
+	previewWidth := closePreviewWidth(m)
 	got := m.renderPreview(previewWidth)
 	if !strings.Contains(got, "step 34") {
 		t.Errorf("close-mode preview does not show the pane's scrollback:\n%s", got)
@@ -473,8 +532,9 @@ func TestPickerModel_WindowNodeWithoutLayoutKeepsHint(t *testing.T) {
 	}
 }
 
-// In close mode the map dashes the pane the event took down.
-func TestPickerModel_CloseMapMarksDeadPane(t *testing.T) {
+// A pane close's preview is about the pane that died: its block names it, and
+// the siblings that survived it are nowhere in the panel.
+func TestPickerModel_ClosePreviewShowsOnlyTheDiedPane(t *testing.T) {
 	sub := snapshot.Manifest{
 		V: 1,
 		Sessions: []snapshot.Session{{
@@ -482,10 +542,9 @@ func TestPickerModel_CloseMapMarksDeadPane(t *testing.T) {
 			Windows: []snapshot.Window{{
 				Index:  1,
 				Layout: "1cb4,80x24,0,0[80x11,0,0,0,80x12,0,12,1]",
-				Panes: []snapshot.Pane{
-					{Index: 0, ID: "%0", Command: "fish"},
-					{Index: 1, ID: "%1", Command: "agent-work"},
-				},
+				// What closeevent.SubManifest now hands the picker for a pane
+				// close: the enclosing window, carrying only the dead pane.
+				Panes: []snapshot.Pane{{Index: 1, ID: "%1", Command: "agent-work"}},
 			}},
 		}},
 	}
@@ -498,14 +557,17 @@ func TestPickerModel_CloseMapMarksDeadPane(t *testing.T) {
 
 	m := NewPickerModel(ModeClose, []store.Event{ev}, nil, nil)
 	m.SetCloseContexts(ctxs)
-	m.SetCloseTree(BuildCloseTree([]store.Event{ev}, ctxs, "demo", nil))
+	m.SetCloseRows(BuildCloseList([]store.Event{ev}, ctxs, "demo"))
 	m.Bootstrap()
 	m.width, m.height = 160, 24
 
-	_, _, previewWidth := m.paneWidthsThree()
-	got := m.renderPreview(previewWidth)
-	if !strings.ContainsRune(got, '┄') && !strings.ContainsRune(got, '┆') {
-		t.Errorf("dead pane not dashed in:\n%s", got)
+	previewWidth := closePreviewWidth(m)
+	got := stripANSI(m.renderPreview(previewWidth))
+	if !strings.Contains(got, "1 · agent-work") || !strings.Contains(got, "1 of 1") {
+		t.Errorf("the dead pane has no block of its own:\n%s", got)
+	}
+	if strings.Contains(got, "fish") {
+		t.Errorf("a surviving sibling leaked into the close preview:\n%s", got)
 	}
 }
 
@@ -547,10 +609,10 @@ func TestPickerModel_DemoKeysEchoesLastKey(t *testing.T) {
 }
 
 // prefix+U used to open on "(press Tab to preview panes)". The preview must be
-// live from the first frame, following the close-tree cursor.
+// live from the first frame, following the close list's cursor.
 func TestRenderPreview_CloseModeNeedsNoTab(t *testing.T) {
 	m := nestedClosePreviewModel(t)
-	_, _, previewW := m.paneWidthsThree()
+	previewW := closePreviewWidth(m)
 	out := m.renderPreview(previewW)
 	if strings.Contains(out, "press Tab") {
 		t.Errorf("close preview still gated behind Tab:\n%s", out)
@@ -563,7 +625,7 @@ func TestRenderPreview_CloseModeNeedsNoTab(t *testing.T) {
 // Moving the close cursor must move the preview with it, without a focus change.
 func TestRenderPreview_CloseModeTracksTheCursor(t *testing.T) {
 	m := nestedClosePreviewModel(t)
-	_, _, previewW := m.paneWidthsThree()
+	previewW := closePreviewWidth(m)
 	first := m.renderPreview(previewW)
 
 	updated, _ := m.Update(tea.KeyPressMsg{Code: 'j'})
@@ -575,26 +637,15 @@ func TestRenderPreview_CloseModeTracksTheCursor(t *testing.T) {
 	if got == first {
 		t.Error("preview did not change when the close cursor moved")
 	}
-	// The cursor now sits on the pane close, so the map must dash %2's box —
-	// the pane that died — and leave %1's alone.
-	dead, alive := boxLine(got, "1 nvim"), boxLine(got, "0 fish")
-	if !strings.ContainsRune(dead, '\u2506') {
-		t.Errorf("the closed pane %%2 is not marked dead:\n%s", got)
+	// The cursor now sits on the pane close, whose sub-manifest carries only
+	// %2 — so the panel shows nvim's block and not fish's.
+	plain := stripANSI(got)
+	if !strings.Contains(plain, "pane close") || !strings.Contains(plain, "1 · nvim") {
+		t.Errorf("the preview did not follow the cursor onto the pane close:\n%s", plain)
 	}
-	if strings.ContainsRune(alive, '\u2506') {
-		t.Errorf("the surviving pane %%1 is marked dead:\n%s", got)
+	if strings.Contains(plain, "fish") {
+		t.Errorf("the surviving pane leaked into the pane close's preview:\n%s", plain)
 	}
-}
-
-// boxLine returns the rendered map line carrying label, where the pane box's
-// own side borders show whether that pane is marked dead.
-func boxLine(render, label string) string {
-	for _, l := range strings.Split(stripANSI(render), "\n") {
-		if strings.Contains(l, label) {
-			return l
-		}
-	}
-	return ""
 }
 
 // nestedClosePreviewModel builds a close-mode picker whose sub-manifest carries
@@ -617,13 +668,20 @@ func nestedClosePreviewModel(t *testing.T) PickerModel {
 		{ID: 1, Ts: 300, Kind: "window-unlinked"},
 		{ID: 2, Ts: 200, Kind: "pane-died"},
 	}
+	paneSub := snapshot.Manifest{Sessions: []snapshot.Session{{
+		Name: "lazytmux",
+		Windows: []snapshot.Window{{
+			Index: 3, Name: "docs", Layout: man.Sessions[0].Windows[0].Layout,
+			Panes: []snapshot.Pane{{Index: 1, Command: "nvim", ID: "%2"}},
+		}},
+	}}}
 	ctxs := map[int64]CloseContext{
 		1: {Label: "w", Placement: ClosePlacement{Session: "lazytmux", WindowIndex: 3, WindowName: "docs", Scope: "window", PaneCount: 2}, SubManifest: man},
-		2: {Label: "pane: nvim", Placement: ClosePlacement{Session: "lazytmux", WindowIndex: 3, WindowName: "docs", Scope: "pane", PaneID: "%2"}, SubManifest: man},
+		2: {Label: "pane: nvim", Placement: ClosePlacement{Session: "lazytmux", WindowIndex: 3, WindowName: "docs", Scope: "pane", PaneID: "%2"}, SubManifest: paneSub},
 	}
 	m := NewPickerModel(ModeClose, evs, nil, nil)
 	m.SetCloseContexts(ctxs)
-	m.SetCloseTree(BuildCloseTree(evs, ctxs, "mono", map[string]bool{}))
+	m.SetCloseRows(BuildCloseList(evs, ctxs, "mono"))
 	m.Bootstrap()
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 160, Height: 40})
 	return updated.(PickerModel)
@@ -640,7 +698,7 @@ func TestPickerModel_CloseModeSchedulesScrollbackAtStartup(t *testing.T) {
 	if !m.loadingSHAs[closeScrollbackSHA] {
 		t.Errorf("Init did not mark %q in flight", closeScrollbackSHA)
 	}
-	_, _, previewW := m.paneWidthsThree()
+	previewW := closePreviewWidth(m)
 	if got := m.renderPreview(previewW); !strings.Contains(got, "loading scrollback") {
 		t.Errorf("first frame does not say the scrollback is on its way:\n%s", got)
 	}
@@ -651,7 +709,7 @@ func TestPickerModel_CloseModeSchedulesScrollbackAtStartup(t *testing.T) {
 // content type the moment a load lands.
 func TestRenderPreview_CloseModePendingScrollback(t *testing.T) {
 	m := closeScrollbackModel(t, closeScrollbackSHA)
-	_, _, previewW := m.paneWidthsThree()
+	previewW := closePreviewWidth(m)
 	if got := m.renderPreview(previewW); !strings.Contains(got, "scrollback pending") {
 		t.Errorf("an unscheduled scrollback does not read as pending:\n%s", got)
 	}
@@ -661,7 +719,7 @@ func TestRenderPreview_CloseModePendingScrollback(t *testing.T) {
 // the list cursor, so the key must leave both focus and the panel alone.
 func TestPickerModel_CloseModeTabIsInert(t *testing.T) {
 	m := nestedClosePreviewModel(t)
-	_, _, previewW := m.paneWidthsThree()
+	previewW := closePreviewWidth(m)
 	before := m.renderPreview(previewW)
 
 	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
@@ -684,7 +742,7 @@ func TestPickerModel_CloseModeAltScrollsPreview(t *testing.T) {
 	}
 	m.scrollbacks[closeScrollbackSHA] = []byte(b.String())
 
-	_, _, previewW := m.paneWidthsThree()
+	previewW := closePreviewWidth(m)
 	maxScroll := m.previewMaxScroll(m.previewInnerHeight())
 	if maxScroll == 0 {
 		t.Fatal("fixture scrollback is not taller than the preview panel")
@@ -749,7 +807,7 @@ func closeScrollbackModel(t *testing.T, sha string) PickerModel {
 	}}
 	m := NewPickerModel(ModeClose, []store.Event{ev}, nil, scrollback.New(t.TempDir()))
 	m.SetCloseContexts(ctxs)
-	m.SetCloseTree(BuildCloseTree([]store.Event{ev}, ctxs, "demo", nil))
+	m.SetCloseRows(BuildCloseList([]store.Event{ev}, ctxs, "demo"))
 	m.Bootstrap()
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 160, Height: 20})
 	return updated.(PickerModel)
@@ -775,8 +833,8 @@ func TestClosePreviewWindow_SessionNameMismatchFallsBack(t *testing.T) {
 	if w := closePreviewWindow(cc); w == nil {
 		t.Fatal("closePreviewWindow returned nil for a session name mismatch; the map/scrollback goes blank")
 	}
-	if sha := closeSHAFor(cc); sha != "aaa" {
-		t.Errorf("closeSHAFor = %q, want %q", sha, "aaa")
+	if sha := closePreviewWindow(cc).Panes[0].ScrollbackSHA; sha != "aaa" {
+		t.Errorf("resolved scrollback = %q, want %q", sha, "aaa")
 	}
 }
 
@@ -801,13 +859,10 @@ func TestClosePreviewWindow_MultiSessionSubManifestDoesNotFallBack(t *testing.T)
 	}
 }
 
-// Left can collapse a window row and land the cursor on an *event* row above
-// it — not just on a pane row it collapsed from. Two pane closes in two
-// windows of one other-session group produce that shape: collapsing the
-// second window's header walks the cursor up past its own pure-header row to
-// the first window's pane close, which must still reset the preview scroll
-// and schedule that pane's scrollback.
-func TestPickerModel_CloseModeLeftLandsOnEventRowAboveCollapsedWindow(t *testing.T) {
+// Moving the cursor to another close must reset the preview scroll and
+// schedule the scrollback of the pane it lands on — otherwise the new close's
+// block opens mid-buffer, or hangs on "(loading scrollback…)" forever.
+func TestPickerModel_CloseModeCursorMoveResetsScrollAndLoads(t *testing.T) {
 	man := snapshot.Manifest{Sessions: []snapshot.Session{{
 		Name: "lazytmux",
 		Windows: []snapshot.Window{
@@ -825,41 +880,44 @@ func TestPickerModel_CloseModeLeftLandsOnEventRowAboveCollapsedWindow(t *testing
 	}
 	m := NewPickerModel(ModeClose, evs, nil, scrollback.New(t.TempDir()))
 	m.SetCloseContexts(ctxs)
-	m.SetCloseTree(BuildCloseTree(evs, ctxs, "mono", nil))
+	m.SetCloseRows(BuildCloseList(evs, ctxs, "mono"))
 	m.Bootstrap()
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 160, Height: 40})
 	m = updated.(PickerModel)
 
-	vis := m.CloseVisible()
-	if len(vis) != 6 {
-		t.Fatalf("flattened close tree has %d rows, want 6: %+v", len(vis), vis)
+	// Row 0 is the OTHER SESSIONS header; the cursor opens on alpha's close.
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	m = updated.(PickerModel)
+	if m.cursor != 2 {
+		t.Fatalf("cursor landed on %d, want 2 (beta's pane %%2 close)", m.cursor)
 	}
-	m.cursor = 5 // beta's pane %2 close
 	m.previewScroll = 3
+	delete(m.loadingSHAs, "aaa") // scheduled by Bootstrap; watch this move re-schedule it
 
-	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyLeft})
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyUp})
 	m = updated.(PickerModel)
 
-	if m.cursor != 3 {
-		t.Fatalf("cursor landed on %d, want 3 (alpha's pane %%1 close)", m.cursor)
+	if m.cursor != 1 {
+		t.Fatalf("cursor landed on %d, want 1 (alpha's pane %%1 close)", m.cursor)
 	}
 	if m.previewScroll != 0 {
-		t.Errorf("previewScroll = %d, want 0 after Left", m.previewScroll)
+		t.Errorf("previewScroll = %d, want 0 after moving to another close", m.previewScroll)
 	}
 	if !m.loadingSHAs["aaa"] {
-		t.Error("Left did not schedule the scrollback load for the event row it landed on")
+		t.Error("the move did not schedule the scrollback load for the close it landed on")
 	}
 }
 
-// closePreviewFrameFixture builds a single-close ModeClose model whose sentence
-// length is controlled by scope (window: 3 lines, pane/session: 2 lines) and
-// whose session/window name is long enough to need truncation. scope
-// "missing" uses the window placement (the longest sentence, so the tightest
-// budget) but strips the session's windows from the sub-manifest, so
-// closePreviewWindow finds nothing and renderClosePreview takes its "nothing
-// captured" branch instead of the map. The session itself is kept (a
-// zero-session sub-manifest makes BuildCloseTree hide the row entirely, per
-// closetree.go's "nothing to restore" rule — a different case than this one).
+// closePreviewFrameFixture builds a single-close ModeClose model whose body is
+// controlled by scope: "window" stacks two pane blocks, "one" fills the panel
+// with a single one, "pane" is the narrowed single-pane sub-manifest a pane
+// close now produces, and "missing" strips the session's windows so
+// closePreviewWindow finds nothing and the body takes its "nothing captured"
+// branch. The session itself is kept (a zero-session sub-manifest makes
+// BuildCloseList drop the row entirely, per its "nothing to restore" rule —
+// a different case than this one). Every pane carries far more
+// scrollback than any frame here can hold, and the session/window name is long
+// enough to need truncation, so both axes of the box math are under load.
 func closePreviewFrameFixture(t *testing.T, scope string) PickerModel {
 	t.Helper()
 	longName := "a-really-long-window-name-that-will-not-fit-in-any-narrow-panel-at-all"
@@ -872,16 +930,20 @@ func closePreviewFrameFixture(t *testing.T, scope string) PickerModel {
 				Name:   longName,
 				Layout: "1cb4,80x24,0,0[80x11,0,0,0,80x12,0,12,1]",
 				Panes: []snapshot.Pane{
-					{Index: 0, ID: "%0", Command: "fish"},
-					{Index: 1, ID: "%1", Command: "agent-work"},
+					{Index: 0, ID: "%0", Command: "fish", ScrollbackSHA: "sha0"},
+					{Index: 1, ID: "%1", Command: "agent-work", ScrollbackSHA: "sha1"},
 				},
 			}},
 		}},
 	}
 	placementScope := scope
-	if scope == "missing" {
+	switch scope {
+	case "missing":
 		placementScope = "window"
 		sub.Sessions[0].Windows = nil
+	case "one", "pane":
+		placementScope = "pane"
+		sub.Sessions[0].Windows[0].Panes = sub.Sessions[0].Windows[0].Panes[:1]
 	}
 	ev := store.Event{ID: 1, Ts: time.Now().UnixMilli(), Kind: "window-unlinked"}
 	ctxs := map[int64]CloseContext{1: {
@@ -894,26 +956,33 @@ func closePreviewFrameFixture(t *testing.T, scope string) PickerModel {
 	}}
 	m := NewPickerModel(ModeClose, []store.Event{ev}, nil, nil)
 	m.SetCloseContexts(ctxs)
-	m.SetCloseTree(BuildCloseTree([]store.Event{ev}, ctxs, "demo-"+longName, nil))
+	m.SetCloseRows(BuildCloseList([]store.Event{ev}, ctxs, "demo-"+longName))
 	m.Bootstrap()
+	var b strings.Builder
+	for i := 1; i <= 200; i++ {
+		fmt.Fprintf(&b, "scrollback line %d with enough text to overflow a narrow panel\n", i)
+	}
+	m.scrollbacks["sha0"] = []byte(b.String())
+	m.scrollbacks["sha1"] = []byte(b.String())
 	return m
 }
 
 // TestRenderClosePreview_NeverOverflowsFrame guards renderClosePreview's box
-// math the same way TestRenderList/TestRenderCloseTree guard theirs: a
+// math the same way TestRenderList/TestRenderCloseList guard theirs: a
 // lipgloss frame pads short content but does not clip overflow, so a body
-// with more lines than previewInnerHeight() pushes the closing border past
-// the requested height (MaxHeight then hard-truncates the render, dropping
-// that border row and cutting the last content line off mid-string). Close
-// mode never stacks, so the panel always takes the whole body: the shortest
-// terminal the picker will draw (bodyHeight's floor of 5) is what drives
-// previewInnerHeight() to its minimum of 3, where the map budget is 1 row for
-// the pane fixture and 0 for the window and missing fixtures (their longer
-// restore sentence leaves no room), and the restore sentence takes the rest.
+// with more lines than previewInnerHeight() pushes the closing border past the
+// requested height. MaxHeight then hard-truncates the *line list*, so the
+// bottom border is what gets dropped and a plain height assertion cannot see
+// it — the corners are asserted too. Every fixture's panes carry more
+// scrollback than the panel can hold, so each block is always full.
+//
+// bodyHeight's floor of 5 puts previewInnerHeight()'s reachable minimum at 3,
+// where the two-line header leaves the body a single row.
 func TestRenderClosePreview_NeverOverflowsFrame(t *testing.T) {
 	applyTheme(NewTheme())
 	sizes := []struct{ w, h int }{
-		{90, 6},   // bodyHeight floor 5 -> previewInnerHeight 3: map budget 1 (pane) / 0 (window)
+		{90, 6},   // bodyHeight floor 5 -> previewInnerHeight 3: body budget 1
+		{90, 7},   // previewInnerHeight 4: body budget 2 -> one block, one content row
 		{90, 8},   // previewInnerHeight 5
 		{90, 10},  // previewInnerHeight 7
 		{90, 12},  // previewInnerHeight 9
@@ -921,7 +990,7 @@ func TestRenderClosePreview_NeverOverflowsFrame(t *testing.T) {
 		{40, 20},  // narrow: below the two-column threshold
 		{160, 30}, // wide and comfortable
 	}
-	for _, scope := range []string{"window", "pane", "missing"} {
+	for _, scope := range []string{"window", "one", "pane", "missing"} {
 		m := closePreviewFrameFixture(t, scope)
 		for _, sz := range sizes {
 			m.width, m.height = sz.w, sz.h
@@ -945,21 +1014,105 @@ func TestRenderClosePreview_NeverOverflowsFrame(t *testing.T) {
 	}
 }
 
-// TestRenderClosePreview_NothingCapturedStillSaysWhatEnterDoes guards the case
-// renderClosePreview used to render worst: with no window to draw a map for,
-// it returned the bare "(nothing captured for this close)" parenthetical and
-// nothing else — exactly where the user most needs the "↵ reopens …" sentence,
-// since there is no map to infer it from.
-func TestRenderClosePreview_NothingCapturedStillSaysWhatEnterDoes(t *testing.T) {
+// TestRenderClosePreview_NeverOverflowsFrameWithAFixedBlock guards the same
+// frame-closing invariant as TestRenderClosePreview_NeverOverflowsFrame, for
+// the path that fixture can't reach: one pane has no scrollback at all, so
+// its block is fixed at label-plus-one-row and the other pane's block absorbs
+// the rest. That reshuffle happens on every resize, so the corners have to
+// survive it at every size just as much as the always-full case does.
+func TestRenderClosePreview_NeverOverflowsFrameWithAFixedBlock(t *testing.T) {
+	applyTheme(NewTheme())
+	sizes := []struct{ w, h int }{
+		{90, 6}, {90, 7}, {90, 8}, {90, 10}, {90, 12}, {90, 30},
+		{40, 20}, {160, 30},
+	}
+	m := closePreviewFrameFixture(t, "window")
+	m.closeContexts[1].SubManifest.Sessions[0].Windows[0].Panes[1].ScrollbackSHA = ""
+	for _, sz := range sizes {
+		m.width, m.height = sz.w, sz.h
+		out := m.renderClosePreview(sz.w)
+		wantH := m.panelFrameHeight()
+		if got := lipgloss.Height(out); got != wantH {
+			t.Errorf("w=%d h=%d: rendered height=%d, want %d\n%s", sz.w, sz.h, got, wantH, out)
+		}
+		if got := lipgloss.Width(out); got != sz.w {
+			t.Errorf("w=%d h=%d: rendered width=%d, want %d", sz.w, sz.h, got, sz.w)
+		}
+		rows := strings.Split(out, "\n")
+		last := rows[len(rows)-1]
+		if !strings.ContainsRune(last, '╰') || !strings.ContainsRune(last, '╯') {
+			t.Errorf("w=%d h=%d: frame did not close, last row is %q\n%s", sz.w, sz.h, last, out)
+		}
+	}
+}
+
+// closePreviewWideRuneFixture is closePreviewFrameFixture's "window" scope
+// with scrollback stuffed with CJK and emoji runes in place of plain ASCII —
+// a stand-in for a real editor/agent pane, and the shape previewWindow's
+// horizontal-scroll path needs to overshoot its budget.
+func closePreviewWideRuneFixture(t *testing.T) PickerModel {
+	t.Helper()
+	m := closePreviewFrameFixture(t, "window")
+	var b strings.Builder
+	for i := 1; i <= 200; i++ {
+		fmt.Fprintf(&b, "行%d 日本語プロジェクトの内容漢字文字列テスト絵文字📁📂🎉 line %d with tail text long enough to overflow a narrow panel\n", i, i)
+	}
+	m.scrollbacks["sha0"] = []byte(b.String())
+	m.scrollbacks["sha1"] = []byte(b.String())
+	return m
+}
+
+// TestRenderClosePreview_NeverOverflowsFrameWithWideRunesScrolled guards the
+// same frame-closing invariant as TestRenderClosePreview_NeverOverflowsFrame,
+// through the one path that test's ASCII fixture can't reach: previewWindow
+// calls ansi.Cut instead of ansi.Truncate whenever previewScrollX > 0 (i.e.
+// after Alt+L), and ansi.Cut overshoots its budget by one cell when a
+// double-width rune straddles either boundary of the cut. The resulting
+// over-wide line wraps inside the lipgloss frame, and MaxHeight's
+// hard-truncation of the rendered line list drops the closing border row —
+// invisible to a height assertion, since the reported height stays exact.
+// Reachable in production with CJK/emoji scrollback and any non-zero
+// previewScrollX.
+func TestRenderClosePreview_NeverOverflowsFrameWithWideRunesScrolled(t *testing.T) {
+	applyTheme(NewTheme())
+	m := closePreviewWideRuneFixture(t)
+	widths := []int{60, 80, 86, 100, 120}
+	heights := []int{12, 20, 30}
+	for _, w := range widths {
+		for _, h := range heights {
+			for scrollX := 1; scrollX <= 40; scrollX++ {
+				m.width, m.height = w, h
+				m.previewScrollX = scrollX
+				out := m.renderClosePreview(w)
+				if got := lipgloss.Height(out); got != m.panelFrameHeight() {
+					t.Errorf("w=%d h=%d scrollX=%d: rendered height=%d, want %d", w, h, scrollX, got, m.panelFrameHeight())
+				}
+				if got := lipgloss.Width(out); got != w {
+					t.Errorf("w=%d h=%d scrollX=%d: rendered width=%d, want %d", w, h, scrollX, got, w)
+				}
+				rows := strings.Split(out, "\n")
+				last := rows[len(rows)-1]
+				if !strings.ContainsRune(last, '╰') || !strings.ContainsRune(last, '╯') {
+					t.Errorf("w=%d h=%d scrollX=%d: frame did not close, last row is %q\n%s", w, h, scrollX, last, out)
+				}
+			}
+		}
+	}
+}
+
+// A close whose sub-manifest holds no window has no scrollback to stack, but
+// the header still has to name what closed — the panel is otherwise blank
+// exactly where the user has least other context.
+func TestRenderClosePreview_NothingCapturedStillNamesTheClose(t *testing.T) {
 	applyTheme(NewTheme())
 	m := closePreviewFrameFixture(t, "missing")
 	m.width, m.height = 90, 30
-	out := m.renderClosePreview(90)
+	out := stripANSI(m.renderClosePreview(90))
 	if !strings.Contains(out, "nothing captured for this close") {
 		t.Errorf("missing the placeholder line entirely:\n%s", out)
 	}
-	if !strings.Contains(out, "↵ reopens window") {
-		t.Errorf("renderClosePreview did not say what Enter would do when nothing was captured:\n%s", out)
+	if !strings.Contains(out, "window close") {
+		t.Errorf("renderClosePreview did not name the close when nothing was captured:\n%s", out)
 	}
 }
 
@@ -1018,5 +1171,314 @@ func TestPickerModel_PaneViewShowsContextMap(t *testing.T) {
 	}
 	if short := stripANSI(m.renderPreview(pw)); strings.ContainsRune(short, '┌') {
 		t.Errorf("short panel should not draw the map:\n%s", short)
+	}
+}
+
+// closeStackFixture builds a close-mode picker sitting on a window close whose
+// window holds len(cmds) panes. Each pane gets a scrollback SHA only where
+// bodies[i] is non-empty; the rest carry none, so the block has to say so.
+func closeStackFixture(t *testing.T, cmds []string, bodies []string) PickerModel {
+	t.Helper()
+	applyTheme(NewTheme())
+	panes := make([]snapshot.Pane, len(cmds))
+	for i, c := range cmds {
+		panes[i] = snapshot.Pane{Index: i, ID: fmt.Sprintf("%%%d", i), Command: c}
+		if bodies[i] != "" {
+			panes[i].ScrollbackSHA = fmt.Sprintf("sha%d", i)
+		}
+	}
+	sub := snapshot.Manifest{V: 1, Sessions: []snapshot.Session{{
+		Name: "halo-nix-amd-ai",
+		Windows: []snapshot.Window{{
+			Index: 1, Name: "nix-amd-ai", ID: "@1",
+			Layout: "1cb4,80x24,0,0[80x11,0,0,0,80x12,0,12,1]",
+			Panes:  panes,
+		}},
+	}}}
+	ev := store.Event{ID: 7, Ts: time.Now().Add(-48 * time.Hour).UnixMilli(), Kind: "window-unlinked"}
+	ctxs := map[int64]CloseContext{7: {
+		Label: "w",
+		Placement: ClosePlacement{
+			Session: "halo-nix-amd-ai", WindowIndex: 1, WindowName: "nix-amd-ai",
+			Scope: "window", PaneCount: len(cmds),
+		},
+		SubManifest: sub,
+	}}
+	m := NewPickerModel(ModeClose, []store.Event{ev}, nil, nil)
+	m.SetCloseContexts(ctxs)
+	m.SetCloseRows(BuildCloseList([]store.Event{ev}, ctxs, "halo-nix-amd-ai"))
+	m.Bootstrap()
+	m.width, m.height = 120, 30
+	for i, b := range bodies {
+		if b != "" {
+			m.scrollbacks[fmt.Sprintf("sha%d", i)] = []byte(b)
+		}
+	}
+	return m
+}
+
+// The header names the close and when it happened, and the pane map is gone:
+// close mode shows output, not geometry.
+func TestRenderClosePreview_HeaderNamesTheClose(t *testing.T) {
+	m := closeStackFixture(t, []string{"claude", "fish"}, []string{"alpha output", "beta output"})
+	got := stripANSI(m.renderClosePreview(120))
+	for _, want := range []string{"halo-nix-amd-ai:1 · nix-amd-ai", "window close", "2 panes", "closed 2d ago"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("header missing %q:\n%s", want, got)
+		}
+	}
+	if strings.ContainsRune(got, '┌') {
+		t.Errorf("close preview still draws the pane map:\n%s", got)
+	}
+	if strings.Contains(got, "↵ reopens") {
+		t.Errorf("close preview still carries the reopens sentence:\n%s", got)
+	}
+}
+
+// One pane's block fills the panel: its label bar sits directly under the
+// header and its scrollback runs to the bottom of the frame.
+func TestRenderClosePreview_OnePaneFillsThePanel(t *testing.T) {
+	var b strings.Builder
+	for i := 1; i <= 60; i++ {
+		fmt.Fprintf(&b, "line %d\n", i)
+	}
+	m := closeStackFixture(t, []string{"claude"}, []string{b.String()})
+	got := stripANSI(m.renderClosePreview(120))
+	if !strings.Contains(got, "0 · claude") {
+		t.Errorf("block is not labelled with its pane:\n%s", got)
+	}
+	if !strings.Contains(got, "1 of 1") {
+		t.Errorf("block carries no position marker:\n%s", got)
+	}
+	if !strings.Contains(got, "line 60") {
+		t.Errorf("block does not show the tail of the scrollback:\n%s", got)
+	}
+	// The panel's interior is header (2) + label (1) + content; one pane means
+	// the content takes every remaining row.
+	body := m.previewInnerHeight() - 3
+	if !strings.Contains(got, fmt.Sprintf("line %d", 60-body+1)) {
+		t.Errorf("one pane does not fill the panel (want %d content rows):\n%s", body, got)
+	}
+}
+
+// Two panes stack, each under its own label bar, each showing its own output.
+func TestRenderClosePreview_TwoPanesStack(t *testing.T) {
+	m := closeStackFixture(t, []string{"claude", "fish"}, []string{"alpha output", "beta output"})
+	got := stripANSI(m.renderClosePreview(120))
+	for _, want := range []string{"0 · claude", "1 of 2", "1 · fish", "2 of 2", "alpha output", "beta output"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("stacked preview missing %q:\n%s", want, got)
+		}
+	}
+	// The second block's label must sit below the first block's content, not
+	// beside it.
+	lines := strings.Split(got, "\n")
+	first, alpha, second := indexOfLine(lines, "0 · claude"), indexOfLine(lines, "alpha output"), indexOfLine(lines, "1 · fish")
+	if first >= alpha || alpha >= second {
+		t.Errorf("blocks are not stacked: label %d, content %d, next label %d\n%s", first, alpha, second, got)
+	}
+}
+
+func indexOfLine(lines []string, want string) int {
+	for i, l := range lines {
+		if strings.Contains(l, want) {
+			return i
+		}
+	}
+	return -1
+}
+
+// A pane the close took down but whose scrollback was never captured says so
+// in its own slot rather than leaving the block blank.
+func TestRenderClosePreview_PaneWithoutScrollbackSaysSo(t *testing.T) {
+	m := closeStackFixture(t, []string{"claude", "fish"}, []string{"alpha output", ""})
+	got := stripANSI(m.renderClosePreview(120))
+	lines := strings.Split(got, "\n")
+	label := indexOfLine(lines, "1 · fish")
+	note := indexOfLine(lines, "no scrollback captured")
+	if label < 0 || note < 0 {
+		t.Fatalf("second block does not report its missing scrollback:\n%s", got)
+	}
+	if note != label+1 {
+		t.Errorf("the note is at row %d, want directly under the label at %d:\n%s", note, label, got)
+	}
+}
+
+// A pane with no captured scrollback gets a block just tall enough for its
+// note — one label row, one content row — not a share of the whole panel.
+// The rail must not run empty down the rows that frees up.
+func TestRenderClosePreview_NoScrollbackBlockDoesNotTrailARail(t *testing.T) {
+	m := closeStackFixture(t, []string{"claude"}, []string{""})
+	got := stripANSI(m.renderClosePreview(120))
+	lines := strings.Split(got, "\n")
+	note := indexOfLine(lines, "no scrollback captured")
+	if note < 0 {
+		t.Fatalf("block does not report its missing scrollback:\n%s", got)
+	}
+	// lipgloss pads the frame's leftover height with blank rows, which is
+	// fine — the defect was a rail glyph drawn through them.
+	for i, l := range lines[note+1:] {
+		if strings.ContainsRune(l, '▌') {
+			t.Errorf("rail glyph on row %d, past the note's only content row:\n%s", note+1+i, got)
+		}
+	}
+}
+
+// A close with one pane that has scrollback and one that doesn't gives nearly
+// all the body to the one with content: the fixed block only needs its note,
+// so the freed rows go to the block that can use them.
+func TestRenderClosePreview_MixedPanesGiveRoomToTheOneWithContent(t *testing.T) {
+	var b strings.Builder
+	for i := 1; i <= 60; i++ {
+		fmt.Fprintf(&b, "line %d\n", i)
+	}
+	m := closeStackFixture(t, []string{"claude", "fish"}, []string{b.String(), ""})
+	got := stripANSI(m.renderClosePreview(120))
+	if !strings.Contains(got, "line 60") {
+		t.Errorf("pane with scrollback does not show its tail:\n%s", got)
+	}
+	lines := strings.Split(got, "\n")
+	note := indexOfLine(lines, "no scrollback captured")
+	if note < 0 {
+		t.Fatalf("second block does not report its missing scrollback:\n%s", got)
+	}
+	if !strings.ContainsRune(lines[note+1], '╰') {
+		t.Errorf("the note is not the fixed block's only content row, want the border directly under it:\n%s", got)
+	}
+	// The first block got everything else: header (2) + its own label (1) +
+	// the second block's label and note (2) + the border (1) leave the rest
+	// for its content.
+	wantFirstBlockContent := m.previewInnerHeight() - 3 - 2
+	if !strings.Contains(got, fmt.Sprintf("line %d", 60-wantFirstBlockContent+1)) {
+		t.Errorf("the pane with content does not fill the room the fixed block freed (want %d content rows):\n%s", wantFirstBlockContent, got)
+	}
+}
+
+// closeBlockHeights is the core of the stacked layout's budget math: a fixed
+// block (no scrollback, an error, still loading) gets exactly its label-plus-
+// one-row minimum, and whatever remains splits evenly across the blocks that
+// have real content to show — falling back to an even split when every block
+// is flexible, same as before fixed blocks existed.
+func TestCloseBlockHeights(t *testing.T) {
+	tests := []struct {
+		name  string
+		fixed []bool
+		body  int
+		want  []int
+	}{
+		{"single fixed pane keeps the rest of the panel blank", []bool{true}, 40, []int{2}},
+		{"single flexible pane fills the whole budget", []bool{false}, 40, []int{40}},
+		{"a fixed pane leaves the rest for its flexible neighbor", []bool{false, true}, 40, []int{38, 2}},
+		{"order does not matter, the fixed pane still gets the minimum", []bool{true, false}, 40, []int{2, 38}},
+		{"two flexible panes split evenly", []bool{false, false}, 10, []int{5, 5}},
+		{"an odd remainder goes to the earlier flexible pane", []bool{false, false}, 11, []int{6, 5}},
+		{"too little room drops the pane past what fits", []bool{false, false, false}, 5, []int{3, 2}},
+		{"no room at all yields no blocks", []bool{true}, 1, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := closeBlockHeights(tt.fixed, tt.body)
+			if len(got) != len(tt.want) {
+				t.Fatalf("closeBlockHeights(%v, %d) = %v, want %v", tt.fixed, tt.body, got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("closeBlockHeights(%v, %d) = %v, want %v", tt.fixed, tt.body, got, tt.want)
+					break
+				}
+			}
+		})
+	}
+}
+
+// The rail is only trustworthy if content cannot reach it: scrollback is full
+// of its own box-drawing, so a line of rules must still start one column in.
+func TestRenderClosePreview_ContentCannotWriteIntoTheRail(t *testing.T) {
+	rules := strings.Repeat(strings.Repeat("─", 200)+"\n", 40)
+	m := closeStackFixture(t, []string{"claude", "fish"}, []string{rules, rules})
+	got := stripANSI(m.renderClosePreview(120))
+	lines := strings.Split(got, "\n")
+	// Skip the frame's border rows and its one column of padding.
+	seen := 0
+	for _, l := range lines[1 : len(lines)-1] {
+		r := []rune(l)
+		if len(r) < 3 {
+			continue
+		}
+		if r[2] == '─' {
+			t.Fatalf("content reached the rail column: %q", l)
+		}
+		if r[2] == '▌' {
+			seen++
+		}
+	}
+	if seen == 0 {
+		t.Fatalf("no rail glyph on any content row:\n%s", got)
+	}
+}
+
+// closePreviewBody is what stands between the stacked body and a dropped
+// bottom border, and the frame test can only reach previewInnerHeight() >= 3.
+// Drive the budget directly, one and two panes, from nothing to comfortable.
+func TestClosePreviewBody_NeverExceedsItsBudget(t *testing.T) {
+	applyTheme(NewTheme())
+	for _, panes := range []int{1, 2} {
+		cmds := []string{"claude", "fish"}[:panes]
+		bodies := []string{"alpha", "beta"}[:panes]
+		m := closeStackFixture(t, cmds, bodies)
+		cc := m.CloseContextFor(7)
+		for h := 0; h <= 5; h++ {
+			got := m.closePreviewBody(cc, 40, h)
+			if len(got) > h {
+				t.Errorf("panes=%d budget=%d: body is %d rows\n%s", panes, h, len(got), strings.Join(got, "\n"))
+			}
+			if h >= 2 && len(got) != h {
+				t.Errorf("panes=%d budget=%d: body is %d rows, want the whole budget filled", panes, h, len(got))
+			}
+			for _, l := range got {
+				if w := lipgloss.Width(l); w > 40 {
+					t.Errorf("panes=%d budget=%d: row is %d cells wide, want <= 40: %q", panes, h, w, l)
+				}
+			}
+		}
+	}
+}
+
+// A pane whose scrollback was never captured has no hash to load. Scheduling
+// its empty string would hand loadScrollbackCmd a path that cannot exist and
+// stamp an error against "" that every later empty-SHA pane would inherit.
+func TestPickerModel_CloseModeSkipsPanesWithNoScrollback(t *testing.T) {
+	m := closeStackFixture(t, []string{"claude", "fish"}, []string{"alpha", ""})
+	if got := m.closeCursorSHAs(); len(got) != 1 || got[0] != "sha0" {
+		t.Fatalf("closeCursorSHAs = %q, want just the captured pane's hash", got)
+	}
+
+	m.scrollbackStore = scrollback.New(t.TempDir())
+	delete(m.scrollbacks, "sha0")
+	m.PreviewCmd()
+	if m.loadingSHAs[""] {
+		t.Error("PreviewCmd scheduled a load for the pane with no scrollback")
+	}
+}
+
+// Both panes of a two-pane close need their scrollback scheduled: a single
+// hash leaves the second block on "(scrollback pending)" forever, since
+// nothing else ever schedules it.
+func TestPickerModel_CloseModeSchedulesEveryPanesScrollback(t *testing.T) {
+	m := closeStackFixture(t, []string{"claude", "fish"}, []string{"alpha", "beta"})
+	m.scrollbackStore = scrollback.New(t.TempDir())
+	delete(m.scrollbacks, "sha0")
+	delete(m.scrollbacks, "sha1")
+
+	if cmd := m.PreviewCmd(); cmd == nil {
+		t.Fatal("PreviewCmd scheduled nothing for a two-pane close")
+	}
+	for _, sha := range []string{"sha0", "sha1"} {
+		if !m.loadingSHAs[sha] {
+			t.Errorf("PreviewCmd left %q unscheduled; its block can never leave 'pending'", sha)
+		}
+	}
+	if cmd := m.PreviewCmd(); cmd != nil {
+		t.Error("PreviewCmd re-scheduled hashes already in flight")
 	}
 }

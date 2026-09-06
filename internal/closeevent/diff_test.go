@@ -204,3 +204,144 @@ func TestSubManifest_RoundTripsForRestore(t *testing.T) {
 		t.Errorf("got windows %+v, want one window with Index=2", m.Sessions[0].Windows)
 	}
 }
+
+func TestSubManifest_PaneScopeCarriesOnlyTheDiedPane(t *testing.T) {
+	win := &snapshot.Window{
+		Index: 2, Name: "logs", ID: "@1",
+		Panes: []snapshot.Pane{
+			{Index: 1, ID: "%1", Command: "claude", Cwd: "/x"},
+			{Index: 2, ID: "%2", Command: "fish", Cwd: "/y"},
+		},
+	}
+	item := &closeevent.ClosedItem{
+		SessionName: "lazytmux",
+		Pane:        &win.Panes[1],
+		Window:      win,
+		WindowIndex: 2,
+	}
+	m := item.SubManifest("h", 100)
+	if len(m.Sessions) != 1 || len(m.Sessions[0].Windows) != 1 {
+		t.Fatalf("want one session with one window, got %+v", m.Sessions)
+	}
+	w := m.Sessions[0].Windows[0]
+	if w.Index != 2 || w.Name != "logs" {
+		t.Errorf("got window %d/%q, want 2/logs", w.Index, w.Name)
+	}
+	if len(w.Panes) != 1 {
+		t.Fatalf("want only the died pane, got %+v", w.Panes)
+	}
+	if w.Panes[0].ID != "%2" {
+		t.Errorf("got pane %q, want the died pane %%2", w.Panes[0].ID)
+	}
+	// The prior snapshot is shared with the restore path; narrowing must copy.
+	if len(win.Panes) != 2 {
+		t.Errorf("SubManifest mutated the source window: %+v", win.Panes)
+	}
+}
+
+func TestFindClosed_SessionClosed_NamedEventPicksItsOwnSession(t *testing.T) {
+	// Two sessions are absent from the post-close index — a stale snapshot, or
+	// several closes in a row. The event names the second one.
+	prior := snapshot.Manifest{
+		V:    1,
+		Host: "h",
+		Sessions: []snapshot.Session{
+			{Name: "halo-nix-config", Windows: []snapshot.Window{{Index: 1, Name: "main"}}},
+			{Name: "noamsto", Windows: []snapshot.Window{{Index: 1, Name: "main"}}},
+			{Name: "lazytmux", Windows: []snapshot.Window{{Index: 1, Name: "main"}}},
+		},
+	}
+	post := closeevent.CloseManifest{
+		SessionName: "noamsto",
+		Index: closeevent.IndexPost{
+			Windows: []tmux.WindowRow{{Session: "lazytmux", Index: 1, Name: "main"}},
+		},
+	}
+	got := closeevent.FindClosed(prior, post, "session-closed")
+	if got == nil || got.Session == nil {
+		t.Fatal("expected closed session, got nil")
+	}
+	if got.SessionName != "noamsto" {
+		t.Errorf("got SessionName=%q, want noamsto", got.SessionName)
+	}
+	if got.Session != &prior.Sessions[1] {
+		t.Errorf("got Session=%+v, want the noamsto session", got.Session)
+	}
+}
+
+func TestFindClosed_SessionClosed_UnnamedEventFallsBackToScan(t *testing.T) {
+	// Events recorded before SessionName was stored carry no name; the
+	// first-missing scan is still the only attribution available.
+	prior := snapshot.Manifest{
+		V:    1,
+		Host: "h",
+		Sessions: []snapshot.Session{
+			{Name: "halo-nix-config", Windows: []snapshot.Window{{Index: 1, Name: "main"}}},
+			{Name: "lazytmux", Windows: []snapshot.Window{{Index: 1, Name: "main"}}},
+		},
+	}
+	post := closeevent.CloseManifest{
+		Index: closeevent.IndexPost{
+			Windows: []tmux.WindowRow{{Session: "lazytmux", Index: 1, Name: "main"}},
+		},
+	}
+	got := closeevent.FindClosed(prior, post, "session-closed")
+	if got == nil || got.Session == nil {
+		t.Fatal("expected closed session, got nil")
+	}
+	if got.SessionName != "halo-nix-config" {
+		t.Errorf("got SessionName=%q, want halo-nix-config", got.SessionName)
+	}
+}
+
+func TestFindClosed_SessionClosed_UnknownNameWithOneCandidate(t *testing.T) {
+	// The event names a session the prior snapshot doesn't hold, but exactly
+	// one session is non-live — the attribution is unambiguous whatever the
+	// name says, and a rename is the likely explanation.
+	prior := snapshot.Manifest{
+		V:    1,
+		Host: "h",
+		Sessions: []snapshot.Session{
+			{Name: "halo-nix-config", Windows: []snapshot.Window{{Index: 1, Name: "main"}}},
+			{Name: "lazytmux", Windows: []snapshot.Window{{Index: 1, Name: "main"}}},
+		},
+	}
+	post := closeevent.CloseManifest{
+		SessionName: "halo-nix-config-renamed",
+		Index: closeevent.IndexPost{
+			Windows: []tmux.WindowRow{{Session: "lazytmux", Index: 1, Name: "main"}},
+		},
+	}
+	got := closeevent.FindClosed(prior, post, "session-closed")
+	if got == nil || got.Session == nil {
+		t.Fatal("expected closed session, got nil")
+	}
+	if got.SessionName != "halo-nix-config" {
+		t.Errorf("got SessionName=%q, want halo-nix-config", got.SessionName)
+	}
+}
+
+func TestFindClosed_SessionClosed_UnknownNameAmbiguousIsUnrecoverable(t *testing.T) {
+	// A scratch session created and killed inside a snapshot gap: no snapshot
+	// holds it, and two sessions are non-live. Guessing the first would offer
+	// a row labelled "remux-shot2" whose restore rebuilds halo-nix-config, so
+	// the close is reported unrecoverable and the picker hides it.
+	prior := snapshot.Manifest{
+		V:    1,
+		Host: "h",
+		Sessions: []snapshot.Session{
+			{Name: "halo-nix-config", Windows: []snapshot.Window{{Index: 1, Name: "main"}}},
+			{Name: "noamsto", Windows: []snapshot.Window{{Index: 1, Name: "main"}}},
+			{Name: "lazytmux", Windows: []snapshot.Window{{Index: 1, Name: "main"}}},
+		},
+	}
+	post := closeevent.CloseManifest{
+		SessionName: "remux-shot2",
+		Index: closeevent.IndexPost{
+			Windows: []tmux.WindowRow{{Session: "lazytmux", Index: 1, Name: "main"}},
+		},
+	}
+	if got := closeevent.FindClosed(prior, post, "session-closed"); got != nil {
+		t.Errorf("got %+v (Session=%+v), want nil for an ambiguous unmatched name", got, got.Session)
+	}
+}

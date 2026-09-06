@@ -264,7 +264,7 @@ func closeModel(t *testing.T, hidden int) picker.PickerModel {
 	running := map[string]bool{"mono": true}
 	m := picker.NewPickerModel(picker.ModeClose, events, running, nil)
 	m.SetCloseContexts(ctxs)
-	m.SetCloseTree(picker.BuildCloseTree(events, ctxs, "mono", running))
+	m.SetCloseRows(picker.BuildCloseList(events, ctxs, "mono"))
 	m.SetHiddenCount(hidden)
 	m.Bootstrap()
 	upd, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
@@ -276,7 +276,7 @@ func TestModel_CloseModeShowsHiddenCountLine(t *testing.T) {
 	if !strings.Contains(out, "14 unrecoverable closes hidden") {
 		t.Errorf("expected hidden-count line, got:\n%s", out)
 	}
-	if !strings.Contains(out, "mono/win (1p)") {
+	if !strings.Contains(out, "win → mono:4") {
 		t.Errorf("recoverable row should still render, got:\n%s", out)
 	}
 }
@@ -300,7 +300,7 @@ func TestModel_CloseModeNoHiddenLineWhenZero(t *testing.T) {
 
 func TestModel_CloseModeAllHiddenEmptyState(t *testing.T) {
 	m := picker.NewPickerModel(picker.ModeClose, nil, nil, nil)
-	m.SetCloseTree(picker.BuildCloseTree(nil, nil, "", nil))
+	m.SetCloseRows(picker.BuildCloseList(nil, nil, ""))
 	m.SetHiddenCount(5)
 	m.Bootstrap()
 	upd, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
@@ -310,183 +310,146 @@ func TestModel_CloseModeAllHiddenEmptyState(t *testing.T) {
 	}
 }
 
-// closeTreeModel builds a close-mode model over two sessions: mono (this
-// session) with window 2 holding a dead pane, and lazytmux with its own close.
-func closeTreeModel() picker.PickerModel {
-	evs := []store.Event{
-		{ID: 1, Ts: 300, Kind: "window-unlinked"},
-		{ID: 2, Ts: 200, Kind: "pane-died"},
-		{ID: 3, Ts: 100, Kind: "window-unlinked"},
-	}
-	ctxs := map[int64]picker.CloseContext{
-		1: closeCtx("mono", 2, "main", "window", 1),
-		2: closeCtx("mono", 2, "main", "pane", 0),
-		3: closeCtx("lazytmux", 3, "docs", "window", 1),
-	}
-	m := picker.NewPickerModel(picker.ModeClose, evs, map[string]bool{"mono": true}, nil)
-	m.SetCloseContexts(ctxs)
-	m.SetCloseTree(picker.BuildCloseTree(evs, ctxs, "mono", map[string]bool{"mono": true}))
-	m.Bootstrap()
-	return m
-}
-
-func TestCloseTreeCursorStartsOnNewestSelectableClose(t *testing.T) {
-	m := closeTreeModel()
-	if got := m.CurrentEventID(); got != 1 {
-		t.Errorf("CurrentEventID = %d, want 1 (this session's newest close)", got)
-	}
-}
-
-func TestCloseTreeDownSkipsGroupHeaders(t *testing.T) {
-	m := closeTreeModel()
-	// From the window close, Down must land on the nested pane, not on a header.
-	next, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
-	got := next.(picker.PickerModel)
-	if id := got.CurrentEventID(); id != 2 {
-		t.Errorf("after Down, CurrentEventID = %d, want the nested pane event 2", id)
-	}
-}
-
-func TestCloseTreeEnterOnHeaderDoesNotSelect(t *testing.T) {
-	m := closeTreeModel()
-	// Collapse this-session so the cursor sits on the group header itself.
-	vis := m.CloseVisible()
-	if len(vis) == 0 || !picker.IsCloseGroup(vis[0]) {
-		t.Fatalf("expected a group header first, got %+v", vis)
-	}
-	m.SetCursor(0)
-	after, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
-	got := after.(picker.PickerModel)
-	if got.SelectedID() != 0 {
-		t.Errorf("SelectedID = %d, want 0 — a header carries nothing to restore", got.SelectedID())
-	}
-	if got.FooterNote() == "" {
-		t.Error("expected a footer note explaining the header is not restorable")
-	}
-}
-
-func TestCloseTreeRightExpandsCollapsedGroup(t *testing.T) {
-	m := closeTreeModel()
-	// The other-sessions group starts collapsed; step onto it and expand.
-	vis := m.CloseVisible()
-	idx := -1
-	for i, n := range vis {
-		if n.Kind == picker.GroupOther {
-			idx = i
-		}
-	}
-	if idx < 0 {
-		t.Fatal("expected an other-sessions group header")
-	}
-	m.SetCursor(idx)
-	after, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyRight})
-	newVis := after.(picker.PickerModel).CloseVisible()
-
-	// The lazytmux fixture nests a session header over one window close, and
-	// both come back expanded by default, so both rows should surface at once
-	// right after the group header.
-	revealed := newVis[idx+1:]
-	wantLabels := []string{"lazytmux", "3: docs (1p)"}
-	if len(revealed) != len(wantLabels) {
-		t.Fatalf("revealed rows = %v, want %v", revealedLabels(revealed), wantLabels)
-	}
-	for i, want := range wantLabels {
-		if got := revealed[i].Label; got != want {
-			t.Errorf("revealed[%d] = %q, want %q", i, got, want)
-		}
-	}
-}
-
-// revealedLabels renders a []*CloseNode's labels for a failure message.
-func revealedLabels(nodes []*picker.CloseNode) []string {
-	out := make([]string, len(nodes))
-	for i, n := range nodes {
-		out[i] = n.Label
-	}
-	return out
-}
-
-// nestedCloseModel builds a bootstrapped close-mode picker over a session →
-// window → pane scaffolding chain, which closeModel has none of: lazytmux is
-// gone, its window 3 is a live header, and the only restorable thing inside it
-// is a pane close.
-func nestedCloseModel(t *testing.T) picker.PickerModel {
+// closeRowsModel builds a close-mode picker over the flat row list: THIS
+// SESSION (newest first: events 1, 2) then OTHER SESSIONS (event 3). Each
+// event's context carries a real
+// pane with a ScrollbackSHA so the preview-loading tests have something to
+// schedule.
+func closeRowsModel(t *testing.T, sb *scrollback.Store) picker.PickerModel {
 	t.Helper()
-	evs := []store.Event{{ID: 1, Ts: 300, Kind: "pane-died"}}
-	one := snapshot.Manifest{Sessions: []snapshot.Session{{Name: "lazytmux"}}}
-	ctxs := map[int64]picker.CloseContext{
-		1: {
-			Label:       "pane: fish",
-			Placement:   picker.ClosePlacement{Session: "lazytmux", WindowIndex: 3, WindowName: "docs", Scope: "pane"},
-			SubManifest: one,
-		},
+	subManifest := func(session, sha string) snapshot.Manifest {
+		return snapshot.Manifest{Sessions: []snapshot.Session{{
+			Name: session,
+			Windows: []snapshot.Window{{
+				Index: 1, Name: "win",
+				Panes: []snapshot.Pane{{Index: 1, ID: "%1", Command: "fish", ScrollbackSHA: sha}},
+			}},
+		}}}
 	}
-	m := picker.NewPickerModel(picker.ModeClose, evs, nil, nil)
+	ctxs := map[int64]picker.CloseContext{
+		1: {Placement: picker.ClosePlacement{Session: "mono", WindowIndex: 1, Scope: "window"}, SubManifest: subManifest("mono", "sha1")},
+		2: {Placement: picker.ClosePlacement{Session: "mono", WindowIndex: 2, Scope: "window"}, SubManifest: subManifest("mono", "sha2")},
+		3: {Placement: picker.ClosePlacement{Session: "lazytmux", WindowIndex: 1, Scope: "window"}, SubManifest: subManifest("lazytmux", "sha3")},
+	}
+	rows := []picker.CloseRow{
+		{Kind: picker.RowSectionHeader, Section: "THIS SESSION · mono"},
+		{Kind: picker.RowClose, EventID: 1, Ts: 300, Scope: "window", Session: "mono"},
+		{Kind: picker.RowClose, EventID: 2, Ts: 200, Scope: "window", Session: "mono"},
+		{Kind: picker.RowSectionHeader, Section: "OTHER SESSIONS"},
+		{Kind: picker.RowClose, EventID: 3, Ts: 100, Scope: "window", Session: "lazytmux"},
+	}
+	m := picker.NewPickerModel(picker.ModeClose, nil, nil, sb)
 	m.SetCloseContexts(ctxs)
-	m.SetCloseTree(picker.BuildCloseTree(evs, ctxs, "mono", map[string]bool{}))
+	m.SetCloseRows(rows)
 	m.Bootstrap()
 	return m
 }
 
-// Scaffolding rows exist only to indent something restorable. Stopping on them
-// offers a row and then refuses it with "(group — nothing to restore here)".
-func TestModel_CloseNavigationSkipsScaffolding(t *testing.T) {
-	m := nestedCloseModel(t)
-	pm := m
-	// Walk the whole tree downward, then all the way back up.
-	for _, code := range []rune{'j', 'j', 'j', 'j', 'k', 'k', 'k', 'k'} {
-		updated, _ := pm.Update(tea.KeyPressMsg{Code: code})
-		pm = updated.(picker.PickerModel)
-		vis := pm.CloseVisible()
-		n := vis[pm.Cursor()]
-		if n.EventID == 0 && !picker.IsCloseGroup(n) {
-			t.Fatalf("cursor landed on scaffolding row %q", n.Label)
+func TestModel_CloseRowsCursorStartsOnNewestSelectableClose(t *testing.T) {
+	m := closeRowsModel(t, nil)
+	if got := m.CurrentEventID(); got != 1 {
+		t.Errorf("CurrentEventID = %d, want 1 (newest close)", got)
+	}
+}
+
+func TestModel_CloseRowsUpDownSkipHeaders(t *testing.T) {
+	m := closeRowsModel(t, nil)
+	upd, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	pm := upd.(picker.PickerModel)
+	if got := pm.CurrentEventID(); got != 2 {
+		t.Fatalf("after Down, CurrentEventID = %d, want 2", got)
+	}
+	upd, _ = pm.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	pm = upd.(picker.PickerModel)
+	if got := pm.CurrentEventID(); got != 3 {
+		t.Fatalf("after second Down, CurrentEventID = %d, want 3 (stepping over the OTHER SESSIONS header)", got)
+	}
+	upd, _ = pm.Update(tea.KeyPressMsg{Code: tea.KeyUp})
+	pm = upd.(picker.PickerModel)
+	if got := pm.CurrentEventID(); got != 2 {
+		t.Fatalf("after Up, CurrentEventID = %d, want 2 (stepping back over the header)", got)
+	}
+}
+
+func TestModel_CloseRowsLeftRightAreInert(t *testing.T) {
+	m := closeRowsModel(t, nil)
+	before := m.Cursor()
+	for _, code := range []rune{tea.KeyLeft, tea.KeyRight} {
+		upd, cmd := m.Update(tea.KeyPressMsg{Code: code})
+		pm := upd.(picker.PickerModel)
+		if pm.Cursor() != before {
+			t.Errorf("key %v moved the cursor: %d -> %d", code, before, pm.Cursor())
+		}
+		if cmd != nil {
+			t.Errorf("key %v returned a command; the flat list has nothing to expand or collapse", code)
 		}
 	}
 }
 
-// Enter must never refuse a row the cursor can legally occupy: the refusal
-// footer note should appear exactly when that row is a group header. Walk
-// every reachable stop with 'k' — the only key that produces real upward
-// movement from this fixture's starting row — checking Enter at each one.
-func TestModel_CloseEnterRefusesOnlyGroupHeaders(t *testing.T) {
-	m := nestedCloseModel(t)
-	pm := m
-	for {
-		n := pm.CloseVisible()[pm.Cursor()]
-		updated, _ := pm.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
-		got := updated.(picker.PickerModel)
-		if note, isGroup := got.FooterNote(), picker.IsCloseGroup(n); (note != "") != isGroup {
-			t.Fatalf("row %q (group=%v): Enter gave footer note %q", n.Label, isGroup, note)
-		}
-		updated, _ = got.Update(tea.KeyPressMsg{Code: 'k'})
-		next := updated.(picker.PickerModel)
-		if next.Cursor() == got.Cursor() {
-			break // no further upward stop — every reachable row has been checked
-		}
-		pm = next
+func TestModel_CloseRowsEnterSelectsNewestClose(t *testing.T) {
+	m := closeRowsModel(t, nil)
+	upd, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	pm := upd.(picker.PickerModel)
+	if pm.SelectedID() != 1 {
+		t.Errorf("SelectedID = %d, want 1 (the newest close)", pm.SelectedID())
+	}
+	if cmd == nil {
+		t.Error("Enter on a selectable row should quit the program")
 	}
 }
 
-// With scaffolding no longer a cursor stop, Left must collapse the nearest
-// collapsible ancestor and leave the cursor somewhere it may legally sit.
-func TestModel_CloseLeftCollapsesAncestorAndLandsNavigable(t *testing.T) {
-	m := nestedCloseModel(t)
-	// Cursor starts on the newest restorable row: the nested pane close.
-	pm := m
-	before := len(pm.CloseVisible())
-	updated, _ := pm.Update(tea.KeyPressMsg{Code: tea.KeyLeft})
-	pm = updated.(picker.PickerModel)
+// Close mode's key handler claims Up/Down/Enter for the whole mode, not just
+// for a non-empty list. m.events in close mode holds every close event
+// including the unrecoverable ones BuildCloseList drops, so a fall-through to
+// the snapshot handler would page a list the user cannot see and let Enter
+// select a row that has nothing to restore.
+func TestModel_CloseModeWithNoRowsNeverPagesTheEventSlice(t *testing.T) {
+	evs := []store.Event{{ID: 7, Ts: 300, Kind: "pane-died"}, {ID: 8, Ts: 200, Kind: "pane-died"}}
+	m := picker.NewPickerModel(picker.ModeClose, evs, nil, nil)
+	m.SetCloseRows(picker.BuildCloseList(evs, nil, "mono")) // no contexts: nothing recoverable
+	m.SetHiddenCount(len(evs))
+	m.Bootstrap()
 
-	if after := len(pm.CloseVisible()); after >= before {
-		t.Errorf("Left did not collapse anything: %d rows before, %d after", before, after)
+	for _, code := range []rune{tea.KeyDown, tea.KeyDown, tea.KeyUp} {
+		upd, _ := m.Update(tea.KeyPressMsg{Code: code})
+		m = upd.(picker.PickerModel)
+		if m.Cursor() != 0 {
+			t.Fatalf("key %v moved the cursor to %d over an empty list", code, m.Cursor())
+		}
+		if id := m.CurrentEventID(); id != 0 {
+			t.Fatalf("key %v put event %d under the cursor; the list is empty", code, id)
+		}
 	}
-	vis := pm.CloseVisible()
-	if pm.Cursor() < 0 || pm.Cursor() >= len(vis) {
-		t.Fatalf("cursor %d out of range for %d rows", pm.Cursor(), len(vis))
+	upd, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if got := upd.(picker.PickerModel).SelectedID(); got != 0 {
+		t.Errorf("Enter selected event %d; an empty list has nothing to restore", got)
 	}
-	n := vis[pm.Cursor()]
-	if n.EventID == 0 && !picker.IsCloseGroup(n) {
-		t.Errorf("Left left the cursor on scaffolding row %q", n.Label)
+}
+
+// The cursor sitting one past the last row must read as "nothing selected",
+// not index out of range: len(rows) is the first invalid index, so the bound
+// has to be >=, not >.
+func TestModel_CurrentEventIDAtTheRowJustPastTheEnd(t *testing.T) {
+	m := closeRowsModel(t, nil)
+	rows := 5 // the fixture's three closes plus its two section headers
+	m.SetCursor(rows - 1)
+	if got := m.CurrentEventID(); got != 3 {
+		t.Fatalf("cursor on the last row: CurrentEventID = %d, want 3", got)
+	}
+	m.SetCursor(rows)
+	if got := m.CurrentEventID(); got != 0 {
+		t.Errorf("cursor one past the last row: CurrentEventID = %d, want 0", got)
+	}
+}
+
+// #103 fixed a regression where nothing scheduled the cursor's scrollback
+// load until the first key arrived, leaving the first frame's preview blank
+// even though the scrollback existed. Bootstrap+Init must keep scheduling it
+// for the flat list too.
+func TestModel_CloseRowsInitSchedulesFirstScrollbackLoad(t *testing.T) {
+	sb := scrollback.New(t.TempDir())
+	m := closeRowsModel(t, sb)
+	if cmd := m.Init(); cmd == nil {
+		t.Fatal("Init scheduled no load for the initial close row's scrollback")
 	}
 }

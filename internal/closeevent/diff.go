@@ -90,18 +90,25 @@ func (c *ClosedItem) Describe() string {
 }
 
 // SubManifest builds a snapshot.Manifest containing only the closed entity,
-// suitable for restore.BuildPlan. Returns an empty manifest if c is nil.
+// suitable for restore.BuildPlan. A pane close yields its enclosing window
+// carrying just the pane that died — the window is what a restore needs to
+// place the pane back into, but its surviving siblings were not lost.
+// Returns an empty manifest if c is nil.
 func (c *ClosedItem) SubManifest(host string, savedAt int64) snapshot.Manifest {
 	m := snapshot.Manifest{V: 1, Host: host, SavedAt: savedAt}
 	if c == nil {
 		return m
 	}
-	// A pane-died carries its parent Window, so the Window branch covers it:
-	// the sub-manifest is the whole enclosing window (used to recreate it when
-	// it's fully gone, and by the picker).
+	// Pane is checked before Window: a pane-died carries both, and only the
+	// pane that died was lost — its siblings are still running, so listing
+	// them here would report them as casualties of this close.
 	switch {
 	case c.Session != nil:
 		m.Sessions = []snapshot.Session{*c.Session}
+	case c.Pane != nil:
+		w := *c.Window
+		w.Panes = []snapshot.Pane{*c.Pane}
+		m.Sessions = []snapshot.Session{{Name: c.SessionName, Windows: []snapshot.Window{w}}}
 	case c.Window != nil:
 		m.Sessions = []snapshot.Session{{
 			Name:    c.SessionName,
@@ -132,13 +139,37 @@ func findClosedSession(prior snapshot.Manifest, post CloseManifest) *ClosedItem 
 	for _, w := range post.Index.Windows {
 		live[w.Session] = true
 	}
+	var missing []*snapshot.Session
 	for i := range prior.Sessions {
 		s := &prior.Sessions[i]
 		if !live[s.Name] {
-			return &ClosedItem{Session: s, SessionName: s.Name}
+			missing = append(missing, s)
 		}
 	}
-	return nil
+	if len(missing) == 0 {
+		return nil
+	}
+	// The event's own session name pins the entity when several sessions are
+	// absent from the index — a stale snapshot, or closes in a row — where the
+	// first-missing scan would hand every one of them the same session.
+	if post.SessionName != "" {
+		for _, s := range missing {
+			if s.Name == post.SessionName {
+				return &ClosedItem{Session: s, SessionName: s.Name}
+			}
+		}
+		// A named session the snapshot never captured (born and gone inside a
+		// snapshot gap) is only attributable when one candidate remains — then
+		// it is unambiguous, and a rename explains the mismatch. With several,
+		// any pick is a guess, and a wrong one silently restores a different
+		// session's windows under its own name; report it unrecoverable so the
+		// picker hides it rather than offering a row it cannot honour.
+		if len(missing) > 1 {
+			return nil
+		}
+	}
+	// Events recorded before the name was stored have nothing better to go on.
+	return &ClosedItem{Session: missing[0], SessionName: missing[0].Name}
 }
 
 // priorHasWindowIDs reports whether the snapshot records window ids at all.

@@ -1,4 +1,14 @@
 // Package picker renders a Bubble Tea TUI over tmux-remux events.
+//
+// Width arithmetic here has one trap worth knowing before adding a call site.
+// Of the truncation primitives this package uses, only ansi.Truncate is safe:
+// measured over one probe set, ansi.Truncate never exceeded its budget (0/90
+// cases), while ansi.TruncateLeft (10/36) and ansi.Cut (6/36) both overshoot by
+// a cell when a double-width rune straddles the cut. Anything computed from the
+// result — a pad count, a remaining budget — can then go negative on CJK or
+// emoji input, which panics in strings.Repeat and otherwise drops a lipgloss
+// frame's closing border. Both existing call sites clamp with ansi.Truncate; a
+// new one must too.
 package picker
 
 import (

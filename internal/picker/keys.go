@@ -3,9 +3,8 @@ package picker
 import "charm.land/bubbles/v2/key"
 
 type keyMap struct {
-	// mode gates Tab out of the help listings in close mode, where it is bound
-	// but inert (see model.go's Tab case). Left unset, the zero value
-	// ModeSnapshot lists Tab, which is what every other keyMap literal wants.
+	// mode drops the bindings that are inert in close mode from the help
+	// listings. The zero value, ModeSnapshot, lists them all.
 	mode                      Mode
 	Up, Down                  key.Binding
 	Left, Right               key.Binding
@@ -40,24 +39,27 @@ func defaultKeys() keyMap {
 	}
 }
 
-// ShortHelp / FullHelp wire up bubbles/help.Model. Both drop Tab in close
-// mode, where it is inert (see model.go's Tab case).
+// ShortHelp / FullHelp satisfy bubbles' help.KeyMap. Only FullHelp reaches a
+// frame — the `?` overlay forces ShowAll and the footer writes its own hints —
+// but both must agree, so both drop the same bindings in close mode.
 func (k keyMap) ShortHelp() []key.Binding {
 	if k.mode == ModeClose {
-		return []key.Binding{k.Up, k.Down, k.Right, k.Enter, k.Help, k.Quit}
+		return []key.Binding{k.Up, k.Down, k.Enter, k.Help, k.Quit}
 	}
 	return []key.Binding{k.Up, k.Down, k.Right, k.Tab, k.Enter, k.Help, k.Quit}
 }
 
 func (k keyMap) FullHelp() [][]key.Binding {
-	nav := []key.Binding{k.Up, k.Down, k.Left, k.Right}
+	nav := []key.Binding{k.Up, k.Down}
 	if k.mode != ModeClose {
-		nav = append(nav, k.Tab)
+		nav = append(nav, k.Left, k.Right, k.Tab)
 	}
-	return [][]key.Binding{
+	groups := [][]key.Binding{
 		nav,
 		{k.PreviewUp, k.PreviewDown, k.PreviewLeft, k.PreviewRight},
-		{k.ToggleIdle, k.ToggleSkipRunning, k.ToggleAge},
-		{k.Enter, k.Help, k.Quit},
 	}
+	if k.mode != ModeClose {
+		groups = append(groups, []key.Binding{k.ToggleIdle, k.ToggleSkipRunning, k.ToggleAge})
+	}
+	return append(groups, []key.Binding{k.Enter, k.Help, k.Quit})
 }
